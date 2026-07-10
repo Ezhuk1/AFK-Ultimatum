@@ -27,6 +27,7 @@ namespace AutoChooser
 
         public override bool Initialise()
         {
+            Name = "AFK Ultimatum";
             return true;
         }
 
