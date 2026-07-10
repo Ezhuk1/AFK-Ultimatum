@@ -10,7 +10,6 @@ using ExileCore.PoEMemory.Elements;
 using ExileCore.Shared.Attributes;
 using ExileCore.Shared.Interfaces;
 using ExileCore.Shared.Nodes;
-using ExileCore.Shared.AtlasHelper;
 using ImGuiNET;
 using Newtonsoft.Json;
 using SharpDX;
@@ -22,18 +21,11 @@ namespace AutoChooser
     {
         private bool _panelActive;
         private DateTime _lastHandle = DateTime.MinValue;
-        private DateTime _lastVisible = DateTime.MinValue;
-
-        private const float IconSize = 20f;
-
-        // mod (base name) -> game atlas texture key, captured from the live panel
-        private readonly Dictionary<string, string> _iconNames = new(StringComparer.OrdinalIgnoreCase);
-        // atlas texture key -> resolved atlas texture (cached)
-        private readonly Dictionary<string, AtlasTexture> _iconCache = new(StringComparer.OrdinalIgnoreCase);
+        private DateTime _panelOpenTime = DateTime.MinValue;
+        private readonly Random _rng = new();
 
         public override bool Initialise()
         {
-            Settings.Plugin = this;
             return true;
         }
 
@@ -55,19 +47,23 @@ namespace AutoChooser
             }
 
             DateTime now = DateTime.UtcNow;
-            _lastVisible = now;
 
-            // Edge-detect the open: first frame the panel becomes visible we always act.
+            // Edge-detect the open: the first frame the panel becomes visible we just
+            // mark it and wait a short settle delay so the UI is fully interactive.
             if (!_panelActive)
             {
                 _panelActive = true;
-                _lastHandle = now;
-                HandlePanel(panel);
+                _panelOpenTime = now;
                 return;
             }
 
-            // Panel still open from a previous round: retry if our Start click did not
-            // confirm (panel lingers) and enough time has passed to avoid spamming.
+            if ((now - _panelOpenTime).TotalMilliseconds < Settings.SettleDelayMs.Value)
+            {
+                return;
+            }
+
+            // Act once, then retry if our Start click did not confirm and the panel
+            // is still open (avoids the "did not pick on first try" problem).
             if ((now - _lastHandle).TotalMilliseconds >= Settings.RetryIntervalMs.Value)
             {
                 _lastHandle = now;
@@ -124,34 +120,6 @@ namespace AutoChooser
                     LogMessage($"AutoChooser: option[{i}] '{name}' priority={priority}");
                 }
 
-                // Remember the icon for this modifier so the settings list can show it.
-                int baseIdx = MatchBaseMod(name);
-                if (baseIdx >= 0)
-                {
-                    string tex = FindIconTextureName(el);
-                    if (!string.IsNullOrEmpty(tex))
-                    {
-                        _iconNames[AutoChooserSettings.UltimatumMods[baseIdx]] = tex;
-                        if (Settings.Debug.Value)
-                        {
-                            LogMessage($"AutoChooser: captured icon '{tex}' for '{AutoChooserSettings.UltimatumMods[baseIdx]}'");
-                        }
-                    }
-                    else if (Settings.Debug.Value)
-                    {
-                        var sb = $"AutoChooser: no icon in choice '{name}' (text='{el?.GetText(64)}', children={el?.ChildCount}):";
-                        if (el?.Children != null)
-                        {
-                            foreach (var c in el.Children)
-                            {
-                                sb += $" [{c?.GetText(24)}|{c?.TextureName}|ch={c?.ChildCount}]";
-                            }
-                        }
-
-                        LogMessage(sb);
-                    }
-                }
-
                 if (priority < bestPriority)
                 {
                     bestPriority = priority;
@@ -172,7 +140,20 @@ namespace AutoChooser
                 return;
             }
 
+            // Click the chosen card and verify it actually got selected. If the game
+            // did not register the selection, retry a few times before confirming.
             ClickElement(best, $"option[{bestIndex}]");
+            for (int attempt = 0; attempt < 4 && panel.SelectedChoice != bestIndex; attempt++)
+            {
+                if (Settings.Debug.Value)
+                {
+                    LogMessage($"AutoChooser: option not selected yet (SelectedChoice={panel.SelectedChoice}, want {bestIndex}), retry {attempt + 1}");
+                }
+
+                Thread.Sleep(80);
+                ClickElement(best, $"option[{bestIndex}] retry{attempt + 1}");
+            }
+
             LogMessage($"AutoChooser: selected option[{bestIndex}] '{modifierNames.ElementAtOrDefault(bestIndex)}' (priority {bestPriority}).");
 
             Thread.Sleep(Settings.ClickDelayMs.Value);
@@ -255,23 +236,60 @@ namespace AutoChooser
 
             var window = GameController.Window.GetWindowRectangleTimeCache;
             Vector2 topLeft = window.TopLeft;
-            Vector2 clickPos = rect.Center + topLeft;
+            Vector2 center = rect.Center + topLeft;
+
+            int j = Settings.ClickJitter.Value;
+            int jx = j > 0 ? _rng.Next(-j, j + 1) : 0;
+            int jy = j > 0 ? _rng.Next(-j, j + 1) : 0;
+            int x = (int)Math.Round(center.X) + jx;
+            int y = (int)Math.Round(center.Y) + jy;
 
             if (Settings.Debug.Value)
             {
-                LogMessage($"AutoChooser: click {label} at screen ({clickPos.X:0},{clickPos.Y:0}) (winTopLeft {topLeft.X:0},{topLeft.Y:0}, center {rect.Center.X:0},{rect.Center.Y:0})");
+                LogMessage($"AutoChooser: click {label} at screen ({x},{y}) (winTopLeft {topLeft.X:0},{topLeft.Y:0}, center {center.X:0},{center.Y:0})");
             }
 
             try
             {
-                NativeMouse.SetCursorPos((int)Math.Round(clickPos.X), (int)Math.Round(clickPos.Y));
-                Thread.Sleep(15);
+                MoveMouseSmooth(x, y);
+                Thread.Sleep(20 + _rng.Next(0, 40));
                 NativeMouse.LeftClick();
             }
             catch (Exception ex)
             {
                 LogMessage($"AutoChooser: click failed: {ex.Message}");
             }
+        }
+
+        private void MoveMouseSmooth(int targetX, int targetY)
+        {
+            NativeMouse.GetCursorPos(out int sx, out int sy);
+
+            int duration = Settings.MouseSpeedMs.Value;
+            if (!Settings.SmoothMouse.Value || duration <= 0)
+            {
+                NativeMouse.SetCursorPos(targetX, targetY);
+                return;
+            }
+
+            // Ease-in-out with a slight curved path so it does not look robotic.
+            int steps = Math.Max(2, duration / 12);
+            int dx = targetX - sx;
+            int dy = targetY - sy;
+            double perp = _rng.NextDouble() * 0.15 + 0.05;
+            int arc = (int)(Math.Max(Math.Abs(dx), Math.Abs(dy)) * perp) * (_rng.Next(0, 2) == 0 ? -1 : 1);
+
+            for (int s = 1; s <= steps; s++)
+            {
+                double t = (double)s / steps;
+                double e = t < 0.5 ? 2 * t * t : 1 - Math.Pow(-2 * t + 2, 2) / 2;
+                int x = sx + (int)Math.Round(dx * e);
+                int y = sy + (int)Math.Round(dy * e + arc * Math.Sin(Math.PI * t));
+                NativeMouse.SetCursorPos(x, y);
+                Thread.Sleep(duration / steps);
+            }
+
+            NativeMouse.SetCursorPos(targetX, targetY);
         }
 
         private static string Normalize(string text)
@@ -290,153 +308,34 @@ namespace AutoChooser
             return normalized;
         }
 
-        private static string FindIconTextureName(Element el)
-        {
-            return FindIconTextureName(el, 0);
-        }
-
-        private static string FindIconTextureName(Element el, int depth)
-        {
-            if (el == null || depth > 5)
-            {
-                return null;
-            }
-
-            var self = el.TextureName;
-            if (!string.IsNullOrEmpty(self))
-            {
-                return self;
-            }
-
-            var children = el.Children;
-            if (children == null)
-            {
-                return null;
-            }
-
-            foreach (var c in children)
-            {
-                var found = FindIconTextureName(c, depth + 1);
-                if (!string.IsNullOrEmpty(found))
-                {
-                    return found;
-                }
-            }
-
-            return null;
-        }
-
-        internal bool TryDrawIcon(string baseModName)
-        {
-            if (string.IsNullOrEmpty(baseModName) ||
-                !_iconNames.TryGetValue(baseModName, out var texName) ||
-                string.IsNullOrEmpty(texName))
-            {
-                return false;
-            }
-
-            if (!_iconCache.TryGetValue(texName, out var atlas))
-            {
-                try
-                {
-                    atlas = GetAtlasTexture(texName);
-                }
-                catch (Exception ex)
-                {
-                    if (Settings.Debug.Value)
-                    {
-                        LogMessage($"AutoChooser: GetAtlasTexture('{texName}') threw: {ex.Message}");
-                    }
-
-                    atlas = null;
-                }
-
-                _iconCache[texName] = atlas;
-            }
-
-            if (atlas == null)
-            {
-                if (Settings.Debug.Value)
-                {
-                    LogMessage($"AutoChooser: icon for '{baseModName}' -> atlas null (texName='{texName}')");
-                }
-
-                return false;
-            }
-
-            var graphics = Graphics;
-            if (graphics == null)
-            {
-                if (Settings.Debug.Value)
-                {
-                    LogMessage("AutoChooser: Graphics is null, cannot draw icon.");
-                }
-
-                return false;
-            }
-
-            IntPtr texId = IntPtr.Zero;
-            string[] keys = { atlas.AtlasFilePath, atlas.AtlasFileName, texName };
-            foreach (var key in keys)
-            {
-                if (string.IsNullOrEmpty(key))
-                {
-                    continue;
-                }
-
-                try
-                {
-                    if (!graphics.HasImage(key))
-                    {
-                        graphics.InitImage(key, false);
-                    }
-
-                    texId = graphics.GetTextureId(key);
-                }
-                catch (Exception ex)
-                {
-                    if (Settings.Debug.Value)
-                    {
-                        LogMessage($"AutoChooser: texId('{key}') threw: {ex.Message}");
-                    }
-                }
-
-                if (texId != IntPtr.Zero)
-                {
-                    break;
-                }
-            }
-
-            if (texId == IntPtr.Zero)
-            {
-                if (Settings.Debug.Value)
-                {
-                    LogMessage($"AutoChooser: icon for '{baseModName}' -> no texture id (file='{atlas.AtlasFilePath}', name='{atlas.AtlasFileName}')");
-                }
-
-                return false;
-            }
-
-            var uv = atlas.TextureUV;
-            ImGui.Image(
-                texId,
-                new System.Numerics.Vector2(IconSize, IconSize),
-                new System.Numerics.Vector2(uv.X, uv.Y),
-                new System.Numerics.Vector2(uv.Right, uv.Bottom));
-            ImGui.SameLine(0, 4);
-            return true;
-        }
-
         private static class NativeMouse
         {
             [DllImport("user32.dll", EntryPoint = "SetCursorPos")]
             private static extern bool SetCursorPosNative(int x, int y);
 
             [DllImport("user32.dll")]
+            private static extern bool GetCursorPos(out POINT lpPoint);
+
+            [DllImport("user32.dll")]
             private static extern void mouse_event(int dwFlags, int dx, int dy, int cButtons, int dwExtraInfo);
+
+            [StructLayout(LayoutKind.Sequential)]
+            private struct POINT
+            {
+                public int X;
+                public int Y;
+            }
 
             private const int MouseEventLeftDown = 0x02;
             private const int MouseEventLeftUp = 0x04;
+
+            public static void GetCursorPos(out int x, out int y)
+            {
+                POINT p;
+                GetCursorPos(out p);
+                x = p.X;
+                y = p.Y;
+            }
 
             public static void SetCursorPos(int x, int y)
             {
@@ -446,7 +345,7 @@ namespace AutoChooser
             public static void LeftClick()
             {
                 mouse_event(MouseEventLeftDown, 0, 0, 0, 0);
-                Thread.Sleep(10);
+                Thread.Sleep(12);
                 mouse_event(MouseEventLeftUp, 0, 0, 0, 0);
             }
         }
@@ -454,8 +353,6 @@ namespace AutoChooser
 
     public class AutoChooserSettings : ISettings
     {
-        [JsonIgnore]
-        internal AutoChooser Plugin;
         internal static readonly string[] UltimatumMods =
         {
             "Choking Miasma", "Stormcaller Runes", "Raging Dead", "Blistering Cold",
@@ -494,10 +391,22 @@ namespace AutoChooser
         [Menu("Delay between option and start click (ms)", 4)]
         public RangeNode<int> ClickDelayMs { get; set; } = new RangeNode<int>(300, 0, 5000);
 
-        [Menu("Retry interval while panel stays open (ms)", 5)]
+        [Menu("Wait after panel opens before clicking (ms)", 5)]
+        public RangeNode<int> SettleDelayMs { get; set; } = new RangeNode<int>(250, 0, 2000);
+
+        [Menu("Retry interval while panel stays open (ms)", 6)]
         public RangeNode<int> RetryIntervalMs { get; set; } = new RangeNode<int>(1500, 200, 10000);
 
-        [Menu("Debug logging", 6)]
+        [Menu("Smooth (human-like) mouse movement", 7)]
+        public ToggleNode SmoothMouse { get; set; } = new ToggleNode(true);
+
+        [Menu("Mouse move duration (ms)", 8)]
+        public RangeNode<int> MouseSpeedMs { get; set; } = new RangeNode<int>(140, 20, 800);
+
+        [Menu("Random click offset (px) for human feel", 9)]
+        public RangeNode<int> ClickJitter { get; set; } = new RangeNode<int>(4, 0, 25);
+
+        [Menu("Debug logging", 10)]
         public ToggleNode Debug { get; set; } = new ToggleNode(false);
 
         [JsonIgnore]
@@ -518,7 +427,6 @@ namespace AutoChooser
             int n = Math.Min(Priorities.Count, UltimatumMods.Length);
             for (int i = 0; i < n; i++)
             {
-                Plugin?.TryDrawIcon(UltimatumMods[i]);
                 int value = int.TryParse(Priorities[i], out int parsed) ? parsed : 20;
                 if (ImGui.SliderInt(UltimatumMods[i], ref value, 1, 100))
                 {
