@@ -65,6 +65,14 @@ namespace AutoChooser
                 return;
             }
 
+            // Safe AFK: do not move the real cursor or click while you are using
+            // another window. The game only accepts input when it is foreground,
+            // so acting here would just hijack the window on top.
+            if (Settings.OnlyWhenGameFocused.Value && !GameController.Window.IsForeground())
+            {
+                return;
+            }
+
             // Already confirmed this round (panel may linger during the close
             // animation): do not act again and cause a stray click.
             if (_confirmed)
@@ -416,6 +424,9 @@ namespace AutoChooser
         }
 
         public ToggleNode Enable { get; set; } = new ToggleNode(false);
+
+        [Menu("Only act when the game window is in the foreground (safe AFK)", 1)]
+        public ToggleNode OnlyWhenGameFocused { get; set; } = new ToggleNode(true);
 
         [Menu("If all 3 present options are set to 100 (never), pick least-bad anyway", 2)]
         public ToggleNode ForcePickWhenAllAvoided { get; set; } = new ToggleNode(true);
