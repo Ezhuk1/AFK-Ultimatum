@@ -132,6 +132,23 @@ namespace AutoChooser
                     if (!string.IsNullOrEmpty(tex))
                     {
                         _iconNames[AutoChooserSettings.UltimatumMods[baseIdx]] = tex;
+                        if (Settings.Debug.Value)
+                        {
+                            LogMessage($"AutoChooser: captured icon '{tex}' for '{AutoChooserSettings.UltimatumMods[baseIdx]}'");
+                        }
+                    }
+                    else if (Settings.Debug.Value)
+                    {
+                        var sb = $"AutoChooser: no icon in choice '{name}' (text='{el?.GetText(64)}', children={el?.ChildCount}):";
+                        if (el?.Children != null)
+                        {
+                            foreach (var c in el.Children)
+                            {
+                                sb += $" [{c?.GetText(24)}|{c?.TextureName}|ch={c?.ChildCount}]";
+                            }
+                        }
+
+                        LogMessage(sb);
                     }
                 }
 
@@ -275,7 +292,12 @@ namespace AutoChooser
 
         private static string FindIconTextureName(Element el)
         {
-            if (el == null)
+            return FindIconTextureName(el, 0);
+        }
+
+        private static string FindIconTextureName(Element el, int depth)
+        {
+            if (el == null || depth > 5)
             {
                 return null;
             }
@@ -287,28 +309,17 @@ namespace AutoChooser
             }
 
             var children = el.Children;
-            if (children != null)
+            if (children == null)
             {
-                foreach (var c in children)
-                {
-                    var t = c?.TextureName;
-                    if (!string.IsNullOrEmpty(t))
-                    {
-                        return t;
-                    }
+                return null;
+            }
 
-                    var grandchildren = c?.Children;
-                    if (grandchildren != null)
-                    {
-                        foreach (var c2 in grandchildren)
-                        {
-                            var t2 = c2?.TextureName;
-                            if (!string.IsNullOrEmpty(t2))
-                            {
-                                return t2;
-                            }
-                        }
-                    }
+            foreach (var c in children)
+            {
+                var found = FindIconTextureName(c, depth + 1);
+                if (!string.IsNullOrEmpty(found))
+                {
+                    return found;
                 }
             }
 
@@ -330,8 +341,13 @@ namespace AutoChooser
                 {
                     atlas = GetAtlasTexture(texName);
                 }
-                catch
+                catch (Exception ex)
                 {
+                    if (Settings.Debug.Value)
+                    {
+                        LogMessage($"AutoChooser: GetAtlasTexture('{texName}') threw: {ex.Message}");
+                    }
+
                     atlas = null;
                 }
 
@@ -340,27 +356,64 @@ namespace AutoChooser
 
             if (atlas == null)
             {
+                if (Settings.Debug.Value)
+                {
+                    LogMessage($"AutoChooser: icon for '{baseModName}' -> atlas null (texName='{texName}')");
+                }
+
                 return false;
             }
 
             var graphics = Graphics;
             if (graphics == null)
             {
+                if (Settings.Debug.Value)
+                {
+                    LogMessage("AutoChooser: Graphics is null, cannot draw icon.");
+                }
+
                 return false;
             }
 
-            IntPtr texId;
-            try
+            IntPtr texId = IntPtr.Zero;
+            string[] keys = { atlas.AtlasFilePath, atlas.AtlasFileName, texName };
+            foreach (var key in keys)
             {
-                texId = graphics.GetTextureId(atlas.AtlasFileName);
-            }
-            catch
-            {
-                return false;
+                if (string.IsNullOrEmpty(key))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    if (!graphics.HasImage(key))
+                    {
+                        graphics.InitImage(key, false);
+                    }
+
+                    texId = graphics.GetTextureId(key);
+                }
+                catch (Exception ex)
+                {
+                    if (Settings.Debug.Value)
+                    {
+                        LogMessage($"AutoChooser: texId('{key}') threw: {ex.Message}");
+                    }
+                }
+
+                if (texId != IntPtr.Zero)
+                {
+                    break;
+                }
             }
 
             if (texId == IntPtr.Zero)
             {
+                if (Settings.Debug.Value)
+                {
+                    LogMessage($"AutoChooser: icon for '{baseModName}' -> no texture id (file='{atlas.AtlasFilePath}', name='{atlas.AtlasFileName}')");
+                }
+
                 return false;
             }
 
