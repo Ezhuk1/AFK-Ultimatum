@@ -1,99 +1,151 @@
-# AutoChooser
+# AFK Ultimatum
 
-Это плагин для [ExileApi](https://github.com/exApiTools/ExileApi-Compiled) (PoE HUD).
+An [ExileApi](https://github.com/ExileApi/ExileApi) plugin (PoE 3.28 HUD) that automatically picks one of the three **Ultimatum** reward cards by priority and presses the confirm button — using smooth, human-like mouse movement.
 
-Плагин следит за появлением определённого игрового меню. Когда меню открыто,
-он выбирает один из вариантов согласно заданному приоритету и нажимает кнопку старта.
+When you enter an Ultimatum encounter, a panel appears with **three option cards in a row** and a single confirm button below them ("Begin" / "Start"). This plugin selects the most desirable card according to your priority list and clicks confirm for you, so you can AFK through Ultimatum waves.
 
-Заточен под механику **Ultimatum**: при входе в испытание появляется панель с
-**тремя карточками опций в ряд** и одной кнопкой подтверждения («Begin» / «Start»).
-Плагин выбирает одну карточку по приоритету и нажимает кнопку старта.
+---
 
-> Раскладка Ultimatum (подтверждено сторонним проектом
-> [curtis91791/POE_Ultimatum](https://github.com/curtis91791/POE_Ultimatum)):
-> 3 опции располагаются горизонтально, ниже — одна кнопка принятия.
-> Примеры реальных имён модификаторов-опций: `Reduced Recovery`,
-> `Shattered Shield`, `Restless Ground` (зависит от патча/языка клиента).
+## Features
 
-## Установка
+- **Automatic card selection** — picks the visible card with the **lowest** priority value.
+- **Per-modifier priority sliders** — 45 Ultimatum modifiers, each with a `1–100` slider.
+  - `1` = always take this card.
+  - higher = less desirable.
+  - `>= Avoid threshold` = never take this card.
+- **"Never take" support** — mark undesirable modifiers (e.g. monster buffs) so they are skipped.
+- **Human-like cursor** — the mouse glides to the target with eased motion, a slight curved path, randomized travel time (scaled by distance) and a small click jitter, instead of teleporting.
+- **Reliable selection** — verifies the card was actually selected and retries once if the game did not register the click.
+- **No stray clicks after accept** — once the round is confirmed, the plugin will not act again on the same panel.
 
-- Скопируйте скомпилированный `AutoChooser.dll` в папку
-  `PoeHelper\Plugins\Compiled\AutoChooser`.
-- Включите плагин в списке плагинов ExileApi.
+---
 
-## Настройка (меню внутри игры)
+## Installation
 
-В окне настроек плагина ExileApi доступно:
+1. Make sure you have a working [ExileApi](https://github.com/ExileApi/ExileApi) installation (PoE 3.28).
+2. Copy the compiled `AutoChooser.dll` into:
 
-| Параметр | Назначение |
-|----------|------------|
-| **Enable** (чекпоинт) | Главный вкл/выкл плагина. |
-| **Menu title / identifier text** | Текст, по которому определяется нужное меню. Если пусто — срабатывает по кнопке старта + наличию любой опции. |
-| **Start button text** | Текст кнопки запуска (по умолчанию `Begin`). |
-| **Avoid threshold** | Приоритет `>=` этого значения означает «никогда не брать» (по умолчанию `40`). |
-| **Force pick when all avoided** | Если все 3 видимые опции «запрещены», всё равно взять лучшую (чтобы не застрять). |
-| **Delay before clicking option (ms)** | Пауза после открытия меню перед выбором. |
-| **Delay between option and start (ms)** | Пауза между выбором и нажатием старта. |
-| **Retry start press interval (ms)** | Интервал повтора нажатия старта, пока меню открыто. |
-| **Debug logging** | Лог координат кликов. |
-| **Dump texts** | Вывод всех текстов меню при открытии (узнать точные строки). |
+   ```
+   <ExileApi>/Plugins/Compiled/AutoChooser/AutoChooser.dll
+   ```
 
-Ниже в том же окне — список **всех модификаторов Ultimatum**, у каждого
-ползунок **Priority (1–100)**:
+3. Enable **AFK Ultimatum** in the ExileApi plugin list and reload plugins.
 
-- **1** — самый высокий приоритет, берём всегда.
-- Чем больше число — тем менее желательна опция.
-- **≥ Avoid threshold (40)** — никогда не берём.
+> The plugin's display name in ExileApi is **AFK Ultimatum**.
 
-## Пример (Ultimatum)
+---
 
-В Ultimatum горизонтально **3 карточки**. Плагин из присутствующих трёх
-выбирает ту, у которой **наименьший** приоритет (выше в списке), если он
-`< 40`. То есть:
+## Building from source
 
-- Поставь `Shattered Shield`, `Reduced Recovery`, `Stormcaller Runes` и т.п.
-  на значение **40 и выше** → они никогда не выберутся.
-- Поставь желанные (`Restless Ground`, `Quicksand`, `Ruin` …) на **1–10**.
-- Остальные оставь на дефолтном **20** — возьмутся, если нет ничего лучше.
+Requirements:
 
-Результат: из трёх карточек запрещённые (`>=40`) отбрасываются; среди
-оставшихся берётся та, у которой приоритет меньше (например, `Restless Ground`
-с приоритетом 5).
+- .NET 10 SDK (`net10.0-windows`)
+- x64
+- `ExileCore.dll` from your ExileApi installation
 
-### Точные названия карточек Ultimatum (poedb.tw)
+Build:
 
-Это текст на карточке (без суффикса тира «II/III/IV» — плагин матчит по
-подстроке). Для русского клиента — аналоги со `poedb.tw/ru/Ultimatum`.
+```powershell
+# Point exapiPackage at the folder that contains ExileCore.dll
+$env:exapiPackage = "C:\path\to\ExileApi"
+cd AutoChooser
+dotnet build -c Debug
+```
 
-| Категория | Названия (англ.) |
-|-----------|------------------|
-| Окружение (DoT/ловушки) | `Choking Miasma`, `Stormcaller Runes`, `Raging Dead`, `Blistering Cold`, `Restless Ground`, `Stalking Ruin`, `Razor Dance`, `Quicksand`, `Blood Altar` |
-| Тотемы | `Totem of Costly Might`, `Totem of Costly Potency` |
-| Босс/арена | `The Trialmaster`, `Limited Arena` |
-| Руин | `Ruin` |
-| Дебаффы игрока | `Reduced Recovery`, `Lessened Reach`, `Buffs Expire Faster`, `Less Cooldown Recovery`, `Escalating Damage Taken`, `Escalating Monster Speed`, `Profane Monsters`, `Unlucky Criticals`, `Hindering Flasks`, `Drought`, `Ailment and Curse Reflection`, `Lightning Damage from Mana Costs`, `Random Projectiles`, `Treacherous Auras`, `Occasional Impotence`, `Siphoned Charges`, `Impurity`, `Waning Spirit` |
-| Усиление монстров | `Shattered Shield`, `Unstoppable Monsters`, `Lethal Rare Monsters`, `Shielding Monsters`, `Precise Monsters`, `Overwhelming Monsters`, `Deadly Monsters`, `Prismatic Monsters`, `Resistant Monsters`, `Dexterous Monsters`, `Siphoning Monsters`, `Putrid Monsters`, `Impenetrable Monsters` |
+The build references `ExileCore.dll` via the `$(exapiPackage)` variable and pulls the
+following NuGet packages automatically:
 
-Все эти названия уже заранее добавлены в список настроек со значением
-приоритета **20** — нужно только подкрутить ползунки под себя.
+- `SharpDX` 4.2.0
+- `SharpDX.Mathematics` 4.2.0
+- `ImGui.NET` 1.89.7.1
+- `Newtonsoft.Json` 13.0.3
 
-## Как узнать точные тексты (важно)
+The compiled DLL is produced at `AutoChooser/bin/Debug/net10.0-windows/AutoChooser.dll`.
 
-Точные строки зависят от языка клиента и патча. Чтобы их узнать:
+---
 
-1. Включи **Dump texts**.
-2. Открой меню Ultimatum в игре (не выбирая ничего).
-3. В логах ExileApi (`DebugWindow` / консоль) появятся строки
-   `AutoChooser [text]: '...'`.
-4. Скопируй реальные заголовки карточек и текст кнопки, сопоставь со
-   списком и выстави нужные приоритеты.
+## Configuration
 
-> Совет: текст ищется по **подстроке** без учёта регистра, поэтому базового
-> имени (например, `Raging Dead`) достаточно — оно совпадёт и с `Raging Dead IV`.
+Open the plugin settings window inside ExileApi. The following options are available:
 
-## Примечания
+| Setting | Description | Default |
+|----------|-------------|---------|
+| **Enable** | Master on/off switch for the plugin. | `false` |
+| **Avoid threshold** | A priority `>=` this value means **never take** that card. | `40` |
+| **Force pick when all avoided** | If all 3 visible cards are avoided, pick the best one anyway (so you don't get stuck). | `true` |
+| **Default priority** | Priority used for a modifier that is not in the known list. | `20` |
+| **Delay between option and start click (ms)** | Pause between clicking the card and clicking confirm. | `300` |
+| **Wait after panel opens before clicking (ms)** | Settling delay so the UI is fully interactive before acting. | `250` |
+| **Retry interval while panel stays open (ms)** | How often to re-attempt if the confirm did not register and the panel is still open. | `1500` |
+| **Smooth (human-like) mouse movement** | Glide the cursor instead of teleporting it. | `true` |
+| **Min mouse move duration (ms)** | Base travel time; far moves take longer than this. | `140` |
+| **Random click offset (px)** | Small random offset on the click point for a human feel. | `4` |
+| **Debug logging** | Logs click coordinates and selection state to the ExileApi log. | `false` |
 
-- Поиск элементов выполняется по подстроке (без учёта регистра).
-- Если точное имя меню неизвестно, оставьте **Menu title** пустым.
-- Для Ultimatum обычно достаточно выставить приоритеты опций и
-  **Start button text**; **Menu title** можно оставить пустым.
+### Priority sliders
+
+Below the options above is a list of **all 45 Ultimatum modifiers**, each with a
+`Priority (1–100)` slider:
+
+- **1** — highest priority, always take.
+- The larger the number, the less desirable the option.
+- **>= Avoid threshold (40)** — never take this card.
+
+Example setup for Ultimatum:
+
+- Set undesirable monster-buff cards (`Shattered Shield`, `Reduced Recovery`,
+  `Stormcaller Runes`, …) to **40 or higher** → they will never be picked.
+- Set the cards you want (`Restless Ground`, `Quicksand`, `Ruin`, …) to **1–10**.
+- Leave the rest at the default **20** — they get taken only if nothing better is offered.
+
+From the three cards on screen, avoided cards (`>= 40`) are dropped; among the
+remaining ones the plugin picks the one with the **smallest** priority value.
+
+---
+
+## How it works
+
+1. The plugin watches the in-game `UltimatumPanel` (strongly-typed ExileApi API).
+2. When the panel becomes visible, it waits `Settle delay` ms.
+3. It reads the three offered modifiers and looks up each one's priority.
+4. It clicks the card with the lowest priority (smooth eased movement + jitter).
+   - It checks `panel.SelectedChoice` and retries once if the selection did not register.
+5. It clicks the **confirm/start** button, then marks the round as confirmed so no
+   extra clicks happen while the panel closes.
+6. If the panel is still open afterwards (confirm did not take), it retries every
+   `Retry interval` until the panel closes.
+
+Modifier names are matched by **substring** (case-insensitive), so a base name like
+`Raging Dead` also matches `Raging Dead IV`.
+
+---
+
+## Known Ultimatum modifiers
+
+These names are pre-populated in the priority list (default priority `20`). Exact
+strings depend on your client language and game patch; matching is done by substring.
+
+| Category | Names (English) |
+|----------|------------------|
+| Ground / DoT / traps | `Choking Miasma`, `Stormcaller Runes`, `Raging Dead`, `Blistering Cold`, `Restless Ground`, `Stalking Ruin`, `Razor Dance`, `Quicksand`, `Blood Altar` |
+| Totems | `Totem of Costly Might`, `Totem of Costly Potency` |
+| Boss / arena | `The Trialmaster`, `Limited Arena` |
+| Ruin | `Ruin` |
+| Player debuffs | `Reduced Recovery`, `Lessened Reach`, `Buffs Expire Faster`, `Less Cooldown Recovery`, `Escalating Damage Taken`, `Escalating Monster Speed`, `Profane Monsters`, `Unlucky Criticals`, `Hindering Flasks`, `Drought`, `Ailment and Curse Reflection`, `Lightning Damage from Mana Costs`, `Random Projectiles`, `Treacherous Auras`, `Occasional Impotence`, `Siphoned Charges`, `Impurity`, `Waning Spirit` |
+| Monster buffs | `Shattered Shield`, `Unstoppable Monsters`, `Lethal Rare Monsters`, `Shielding Monsters`, `Precise Monsters`, `Overwhelming Monsters`, `Deadly Monsters`, `Prismatic Monsters`, `Resistant Monsters`, `Dexterous Monsters`, `Siphoning Monsters`, `Putrid Monsters`, `Impenetrable Monsters` |
+
+---
+
+## Notes
+
+- Card detection uses the strongly-typed `GameController.IngameState.IngameUi.UltimatumPanel` API.
+- Mouse input is performed via `user32` (`SetCursorPos` + `mouse_event`) so the real cursor moves on screen.
+- Enable **Debug logging** if you want to see the exact click coordinates and selection checks in the ExileApi log.
+
+---
+
+## Disclaimer
+
+This plugin simulates mouse input to interact with the Ultimatum reward UI. Use it at
+your own risk and in accordance with the game's terms of service. It is intended as a
+convenience for the Ultimatum reward selection screen, not a full gameplay bot.
