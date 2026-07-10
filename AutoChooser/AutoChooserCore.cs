@@ -20,6 +20,7 @@ namespace AutoChooser
     public class AutoChooser : BaseSettingsPlugin<AutoChooserSettings>
     {
         private bool _panelActive;
+        private bool _confirmed;
         private DateTime _lastHandle = DateTime.MinValue;
         private DateTime _panelOpenTime = DateTime.MinValue;
         private readonly Random _rng = new();
@@ -42,6 +43,7 @@ namespace AutoChooser
             {
                 // Panel closed: reset so the next open is treated as a fresh round.
                 _panelActive = false;
+                _confirmed = false;
                 _lastHandle = DateTime.MinValue;
                 return;
             }
@@ -58,6 +60,13 @@ namespace AutoChooser
             }
 
             if ((now - _panelOpenTime).TotalMilliseconds < Settings.SettleDelayMs.Value)
+            {
+                return;
+            }
+
+            // Already confirmed this round (panel may linger during the close
+            // animation): do not act again and cause a stray click.
+            if (_confirmed)
             {
                 return;
             }
@@ -141,17 +150,17 @@ namespace AutoChooser
             }
 
             // Click the chosen card and verify it actually got selected. If the game
-            // did not register the selection, retry a few times before confirming.
+            // did not register the selection, retry once before confirming.
             ClickElement(best, $"option[{bestIndex}]");
-            for (int attempt = 0; attempt < 4 && panel.SelectedChoice != bestIndex; attempt++)
+            if (panel.SelectedChoice != bestIndex)
             {
                 if (Settings.Debug.Value)
                 {
-                    LogMessage($"AutoChooser: option not selected yet (SelectedChoice={panel.SelectedChoice}, want {bestIndex}), retry {attempt + 1}");
+                    LogMessage($"AutoChooser: option not selected yet (SelectedChoice={panel.SelectedChoice}, want {bestIndex}), retry");
                 }
 
-                Thread.Sleep(80);
-                ClickElement(best, $"option[{bestIndex}] retry{attempt + 1}");
+                Thread.Sleep(90);
+                ClickElement(best, $"option[{bestIndex}] retry");
             }
 
             LogMessage($"AutoChooser: selected option[{bestIndex}] '{modifierNames.ElementAtOrDefault(bestIndex)}' (priority {bestPriority}).");
@@ -161,6 +170,7 @@ namespace AutoChooser
             if (panel.ConfirmButton is Element confirm && confirm.IsValid && confirm.IsVisible)
             {
                 ClickElement(confirm, "confirm/start");
+                _confirmed = true;
                 LogMessage("AutoChooser: pressed start/confirm.");
             }
             else if (Settings.Debug.Value)
