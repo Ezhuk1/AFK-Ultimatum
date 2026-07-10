@@ -1,6 +1,6 @@
 # AFK Ultimatum
 
-An [ExileApi](https://github.com/ExileApi/ExileApi) plugin (PoE 3.28 HUD) that automatically picks one of the three **Ultimatum** reward cards by priority and presses the confirm button — using smooth, human-like mouse movement.
+An [ExileApi](https://github.com/exApiTools/ExileApi-Compiled) plugin (PoE 3.28 HUD) that automatically picks one of the three **Ultimatum** reward cards by priority and presses the confirm button — using smooth, human-like mouse movement.
 
 When you enter an Ultimatum encounter, a panel appears with **three option cards in a row** and a single confirm button below them ("Begin" / "Start"). This plugin selects the most desirable card according to your priority list and clicks confirm for you, so you can AFK through Ultimatum waves.
 
@@ -13,7 +13,7 @@ When you enter an Ultimatum encounter, a panel appears with **three option cards
   - `1` = always take this card.
   - higher = less desirable.
   - `>= Avoid threshold` = never take this card.
-- **"Never take" support** — mark undesirable modifiers (e.g. monster buffs) so they are skipped.
+- **"Never take" support** — set undesirable modifiers (e.g. monster buffs) to `100` so they are skipped.
 - **Human-like cursor** — the mouse glides to the target with eased motion, a slight curved path, randomized travel time (scaled by distance) and a small click jitter, instead of teleporting.
 - **Reliable selection** — verifies the card was actually selected and retries once if the game did not register the click.
 - **No stray clicks after accept** — once the round is confirmed, the plugin will not act again on the same panel.
@@ -22,45 +22,17 @@ When you enter an Ultimatum encounter, a panel appears with **three option cards
 
 ## Installation
 
-1. Make sure you have a working [ExileApi](https://github.com/ExileApi/ExileApi) installation (PoE 3.28).
-2. Copy the compiled `AutoChooser.dll` into:
+1. Copy the plugin folder (with all its contents) into:
 
    ```
-   <ExileApi>/Plugins/Compiled/AutoChooser/AutoChooser.dll
+   {ExileApi-path}\Plugins\Source\
    ```
+
+2. Make sure you have a working [ExileApi](https://github.com/exApiTools/ExileApi-Compiled) installation (PoE 3.28).
 
 3. Enable **AFK Ultimatum** in the ExileApi plugin list and reload plugins.
 
 > The plugin's display name in ExileApi is **AFK Ultimatum**.
-
----
-
-## Building from source
-
-Requirements:
-
-- .NET 10 SDK (`net10.0-windows`)
-- x64
-- `ExileCore.dll` from your ExileApi installation
-
-Build:
-
-```powershell
-# Point exapiPackage at the folder that contains ExileCore.dll
-$env:exapiPackage = "C:\path\to\ExileApi"
-cd AutoChooser
-dotnet build -c Debug
-```
-
-The build references `ExileCore.dll` via the `$(exapiPackage)` variable and pulls the
-following NuGet packages automatically:
-
-- `SharpDX` 4.2.0
-- `SharpDX.Mathematics` 4.2.0
-- `ImGui.NET` 1.89.7.1
-- `Newtonsoft.Json` 13.0.3
-
-The compiled DLL is produced at `AutoChooser/bin/Debug/net10.0-windows/AutoChooser.dll`.
 
 ---
 
@@ -71,8 +43,7 @@ Open the plugin settings window inside ExileApi. The following options are avail
 | Setting | Description | Default |
 |----------|-------------|---------|
 | **Enable** | Master on/off switch for the plugin. | `false` |
-| **Avoid threshold** | A priority `>=` this value means **never take** that card. | `40` |
-| **Force pick when all avoided** | If all 3 visible cards are avoided, pick the best one anyway (so you don't get stuck). | `true` |
+| **Force pick when all avoided** | If all 3 visible cards are set to `100` (never), pick the least-bad one anyway (so you don't get stuck). | `true` |
 | **Default priority** | Priority used for a modifier that is not in the known list. | `20` |
 | **Delay between option and start click (ms)** | Pause between clicking the card and clicking confirm. | `300` |
 | **Wait after panel opens before clicking (ms)** | Settling delay so the UI is fully interactive before acting. | `250` |
@@ -87,18 +58,18 @@ Open the plugin settings window inside ExileApi. The following options are avail
 Below the options above is a list of **all 45 Ultimatum modifiers**, each with a
 `Priority (1–100)` slider:
 
-- **1** — highest priority, always take.
-- The larger the number, the less desirable the option.
-- **>= Avoid threshold (40)** — never take this card.
+- **1** — highest priority, always take this card first.
+- Higher numbers are less desirable; **99** is only taken as a last resort.
+- **100** — never take this card.
 
 Example setup for Ultimatum:
 
 - Set undesirable monster-buff cards (`Shattered Shield`, `Reduced Recovery`,
-  `Stormcaller Runes`, …) to **40 or higher** → they will never be picked.
+  `Stormcaller Runes`, …) to **100** → they will never be picked.
 - Set the cards you want (`Restless Ground`, `Quicksand`, `Ruin`, …) to **1–10**.
 - Leave the rest at the default **20** — they get taken only if nothing better is offered.
 
-From the three cards on screen, avoided cards (`>= 40`) are dropped; among the
+From the three cards on screen, cards set to **100** are dropped; among the
 remaining ones the plugin picks the one with the **smallest** priority value.
 
 ---

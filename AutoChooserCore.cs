@@ -108,6 +108,12 @@ namespace AutoChooser
             int bestPriority = int.MaxValue;
             Element best = null;
 
+            // Fallback when everything is set to "never" (100): remember the
+            // least-bad option so ForcePick can still choose something.
+            int anyIndex = -1;
+            int anyPriority = int.MaxValue;
+            Element any = null;
+
             for (int i = 0; i < choices.Count; i++)
             {
                 var el = choices[i];
@@ -130,6 +136,19 @@ namespace AutoChooser
                     LogMessage($"AutoChooser: option[{i}] '{name}' priority={priority}");
                 }
 
+                if (priority < anyPriority)
+                {
+                    anyPriority = priority;
+                    anyIndex = i;
+                    any = el;
+                }
+
+                // Priority 100 means "never take" -> skip this card.
+                if (priority >= 100)
+                {
+                    continue;
+                }
+
                 if (priority < bestPriority)
                 {
                     bestPriority = priority;
@@ -140,14 +159,17 @@ namespace AutoChooser
 
             if (best == null)
             {
-                LogMessage("AutoChooser: no valid/visible choice to click.");
-                return;
-            }
-
-            if (bestPriority >= Settings.AvoidThreshold.Value && !Settings.ForcePickWhenAllAvoided.Value)
-            {
-                LogMessage($"AutoChooser: all options avoided (best priority {bestPriority}), not clicking.");
-                return;
+                if (Settings.ForcePickWhenAllAvoided.Value && any != null)
+                {
+                    best = any;
+                    bestIndex = anyIndex;
+                    bestPriority = anyPriority;
+                }
+                else
+                {
+                    LogMessage("AutoChooser: all options set to never (100), not clicking.");
+                    return;
+                }
             }
 
             // Click the chosen card and verify it actually got selected. If the game
@@ -395,10 +417,7 @@ namespace AutoChooser
 
         public ToggleNode Enable { get; set; } = new ToggleNode(false);
 
-        [Menu("Priority >= this value means NEVER take (40 = default)", 1)]
-        public RangeNode<int> AvoidThreshold { get; set; } = new RangeNode<int>(40, 1, 100);
-
-        [Menu("If all 3 present options are avoided, pick best anyway", 2)]
+        [Menu("If all 3 present options are set to 100 (never), pick least-bad anyway", 2)]
         public ToggleNode ForcePickWhenAllAvoided { get; set; } = new ToggleNode(true);
 
         [Menu("Priority used when a modifier is not in the list", 3)]
