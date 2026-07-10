@@ -275,19 +275,24 @@ namespace AutoChooser
         {
             NativeMouse.GetCursorPos(out int sx, out int sy);
 
-            int duration = Settings.MouseSpeedMs.Value;
-            if (!Settings.SmoothMouse.Value || duration <= 0)
+            if (!Settings.SmoothMouse.Value)
             {
                 NativeMouse.SetCursorPos(targetX, targetY);
                 return;
             }
 
-            // Ease-in-out with a slight curved path so it does not look robotic.
-            int steps = Math.Max(2, duration / 12);
             int dx = targetX - sx;
             int dy = targetY - sy;
-            double perp = _rng.NextDouble() * 0.15 + 0.05;
-            int arc = (int)(Math.Max(Math.Abs(dx), Math.Abs(dy)) * perp) * (_rng.Next(0, 2) == 0 ? -1 : 1);
+            double dist = Math.Sqrt(dx * dx + dy * dy);
+
+            // Duration scales with distance, otherwise a far move in a fixed time
+            // looks like an instant teleport while a near move looks smooth.
+            int duration = (int)(dist * 1.2) + Settings.MouseSpeedMs.Value;
+            duration = Math.Min(duration, 1200);
+
+            int steps = Math.Max(2, duration / 10);
+            double perp = _rng.NextDouble() * 0.12 + 0.04;
+            int arc = (int)(dist * perp) * (_rng.Next(0, 2) == 0 ? -1 : 1);
 
             for (int s = 1; s <= steps; s++)
             {
@@ -410,7 +415,7 @@ namespace AutoChooser
         [Menu("Smooth (human-like) mouse movement", 7)]
         public ToggleNode SmoothMouse { get; set; } = new ToggleNode(true);
 
-        [Menu("Mouse move duration (ms)", 8)]
+        [Menu("Min mouse move duration (ms); far moves take longer", 8)]
         public RangeNode<int> MouseSpeedMs { get; set; } = new RangeNode<int>(140, 20, 800);
 
         [Menu("Random click offset (px) for human feel", 9)]
