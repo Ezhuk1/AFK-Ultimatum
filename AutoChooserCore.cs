@@ -3,7 +3,9 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Text.RegularExpressions;
 using System.Threading;
+using System.Windows.Forms;
 using ExileCore;
 using ExileCore.PoEMemory;
 using ExileCore.PoEMemory.Elements;
@@ -20,10 +22,13 @@ namespace AutoChooser
     public class AutoChooser : BaseSettingsPlugin<AutoChooserSettings>
     {
         private bool _panelActive;
-        private bool _confirmed;
+        private bool _votedThisRound;
         private DateTime _lastHandle = DateTime.MinValue;
         private DateTime _panelOpenTime = DateTime.MinValue;
+        private DateTime _followerWaitStart = DateTime.MinValue;
+        private DateTime _pauseUntil = DateTime.MinValue;
         private readonly Random _rng = new();
+        private const int FollowerTimeoutMs = 6000;
 
         public override bool Initialise()
         {
@@ -36,6 +41,18 @@ namespace AutoChooser
             if (!Settings.Enable.Value)
             {
                 _panelActive = false;
+                _pauseUntil = DateTime.MinValue;
+                return;
+            }
+
+            if (Settings.PauseHotkey.PressedOnce())
+            {
+                _pauseUntil = DateTime.UtcNow.AddMilliseconds(Settings.PauseDurationMs.Value);
+                LogMessage($"AutoChooser: paused for {Settings.PauseDurationMs.Value} ms.");
+            }
+
+            if (DateTime.UtcNow < _pauseUntil)
+            {
                 return;
             }
 
@@ -44,8 +61,9 @@ namespace AutoChooser
             {
                 // Panel closed: reset so the next open is treated as a fresh round.
                 _panelActive = false;
-                _confirmed = false;
+                _votedThisRound = false;
                 _lastHandle = DateTime.MinValue;
+                _followerWaitStart = DateTime.MinValue;
                 return;
             }
 
@@ -68,24 +86,29 @@ namespace AutoChooser
             // Safe AFK: do not move the real cursor or click while you are using
             // another window. The game only accepts input when it is foreground,
             // so acting here would just hijack the window on top.
-            if (Settings.OnlyWhenGameFocused.Value && !GameController.Window.IsForeground())
+            if (Settings.OnlyWhenGameFocused.Value)
             {
-                return;
+                var window = GameController?.Window;
+                if (window == null || !window.IsForeground())
+                {
+                    return;
+                }
             }
 
-            // Already confirmed this round (panel may linger during the close
-            // animation): do not act again and cause a stray click.
-            if (_confirmed)
-            {
-                return;
-            }
-
-            // Act once, then retry if our Start click did not confirm and the panel
-            // is still open (avoids the "did not pick on first try" problem).
+            // Act on a throttle. We keep acting while the panel is open so that, in a
+            // party where Confirm stays disabled until everyone has voted, we keep
+            // re-clicking Confirm until it becomes enabled and the panel closes.
             if ((now - _lastHandle).TotalMilliseconds >= Settings.RetryIntervalMs.Value)
             {
                 _lastHandle = now;
-                HandlePanel(panel);
+                try
+                {
+                    HandlePanel(panel);
+                }
+                catch (Exception ex)
+                {
+                    LogMessage($"AutoChooser: handle failed: {ex.Message}");
+                }
             }
         }
 
@@ -112,6 +135,113 @@ namespace AutoChooser
                 return;
             }
 
+            int pickIndex = -1;
+            Element pick = null;
+            int pickPriority = int.MaxValue;
+
+            if (Settings.PartyLeader.Value)
+            {
+                (pickIndex, pick, pickPriority) = PickByPriority(choices, modifierNames);
+            }
+            else
+            {
+                if (!IsInParty())
+                {
+                    if (Settings.Debug.Value)
+                    {
+                        LogMessage("AutoChooser: not in a party, voting by own priority.");
+                    }
+
+                    (pickIndex, pick, pickPriority) = PickByPriority(choices, modifierNames);
+                }
+                else
+                {
+                    int leadIdx = FindLeadingVoteIndex(choices);
+                    if (leadIdx >= 0)
+                    {
+                        pickIndex = leadIdx;
+                        pick = choices[leadIdx];
+                        pickPriority = -1;
+                        int count = GetVoteCount(choices[leadIdx]);
+                        if (Settings.Debug.Value)
+                        {
+                            LogMessage($"AutoChooser: following leading vote -> option[{pickIndex}] (count {count}).");
+                        }
+                    }
+                    else
+                    {
+                        if (_followerWaitStart == DateTime.MinValue)
+                        {
+                            _followerWaitStart = DateTime.UtcNow;
+                        }
+
+                        if ((DateTime.UtcNow - _followerWaitStart).TotalMilliseconds >= FollowerTimeoutMs)
+                        {
+                            if (Settings.Debug.Value)
+                            {
+                                LogMessage("AutoChooser: no votes detected in time, falling back to own priority.");
+                            }
+
+                            (pickIndex, pick, pickPriority) = PickByPriority(choices, modifierNames);
+                        }
+                        else
+                        {
+                            if (Settings.Debug.Value)
+                            {
+                                LogMessage($"AutoChooser: follower waiting for party votes ({(int)(DateTime.UtcNow - _followerWaitStart).TotalMilliseconds} ms).");
+                            }
+
+                            return;
+                        }
+                    }
+                }
+            }
+
+            if (pick == null)
+            {
+                LogMessage("AutoChooser: no selectable option (all set to never, or none visible); not clicking.");
+                _followerWaitStart = DateTime.MinValue;
+                return;
+            }
+
+            // Cast our vote: click the chosen card. Only re-select if we haven't voted
+            // yet or the game didn't register our selection (self-healing).
+            bool needSelect = !_votedThisRound || panel.SelectedChoice != pickIndex;
+            if (needSelect)
+            {
+                ClickElement(pick, $"option[{pickIndex}]");
+                if (panel.SelectedChoice != pickIndex)
+                {
+                    if (Settings.Debug.Value)
+                    {
+                        LogMessage($"AutoChooser: option not selected yet (SelectedChoice={panel.SelectedChoice}, want {pickIndex}), retry");
+                    }
+
+                    Thread.Sleep(90);
+                    ClickElement(pick, $"option[{pickIndex}] retry");
+                }
+
+                LogMessage($"AutoChooser: selected option[{pickIndex}] '{modifierNames.ElementAtOrDefault(pickIndex)}' (priority {pickPriority}).");
+                _votedThisRound = true;
+                Thread.Sleep(Settings.ClickDelayMs.Value);
+            }
+
+            // Click Confirm on every pass. In a party it stays disabled until everyone
+            // has voted, so the click is a no-op until then and succeeds once enabled
+            // (the panel then closes and our per-round state resets).
+            if (panel.ConfirmButton is Element confirm && confirm.IsValid && confirm.IsVisible)
+            {
+                ClickElement(confirm, "confirm/start");
+                LogMessage("AutoChooser: pressed start/confirm.");
+            }
+            else if (Settings.Debug.Value)
+            {
+                LogMessage("AutoChooser: confirm/start button not found or not visible.");
+            }
+        }
+
+        private (int Index, Element Element, int Priority) PickByPriority(List<Element> choices, List<string> modifierNames)
+        {
             int bestIndex = -1;
             int bestPriority = int.MaxValue;
             Element best = null;
@@ -165,49 +295,148 @@ namespace AutoChooser
                 }
             }
 
-            if (best == null)
+            if (best == null && Settings.ForcePickWhenAllAvoided.Value && any != null)
             {
-                if (Settings.ForcePickWhenAllAvoided.Value && any != null)
-                {
-                    best = any;
-                    bestIndex = anyIndex;
-                    bestPriority = anyPriority;
-                }
-                else
-                {
-                    LogMessage("AutoChooser: all options set to never (100), not clicking.");
-                    return;
-                }
+                best = any;
+                bestIndex = anyIndex;
+                bestPriority = anyPriority;
             }
 
-            // Click the chosen card and verify it actually got selected. If the game
-            // did not register the selection, retry once before confirming.
-            ClickElement(best, $"option[{bestIndex}]");
-            if (panel.SelectedChoice != bestIndex)
+            return (bestIndex, best, bestPriority);
+        }
+
+        private int FindLeadingVoteIndex(List<Element> choices)
+        {
+            int bestIdx = -1;
+            int bestCount = 0;
+
+            for (int i = 0; i < choices.Count; i++)
             {
-                if (Settings.Debug.Value)
+                var el = choices[i];
+                if (el == null || !el.IsValid || !el.IsVisible)
                 {
-                    LogMessage($"AutoChooser: option not selected yet (SelectedChoice={panel.SelectedChoice}, want {bestIndex}), retry");
+                    continue;
                 }
 
-                Thread.Sleep(90);
-                ClickElement(best, $"option[{bestIndex}] retry");
+                int count = GetVoteCount(el);
+                if (count > bestCount)
+                {
+                    bestCount = count;
+                    bestIdx = i;
+                }
             }
 
-            LogMessage($"AutoChooser: selected option[{bestIndex}] '{modifierNames.ElementAtOrDefault(bestIndex)}' (priority {bestPriority}).");
+            return bestIdx;
+        }
 
-            Thread.Sleep(Settings.ClickDelayMs.Value);
+        private static int GetVoteCount(Element el)
+        {
+            int max = 0;
+            CollectPureInt(el, ref max, 5);
+            return max;
+        }
 
-            if (panel.ConfirmButton is Element confirm && confirm.IsValid && confirm.IsVisible)
+        private static void CollectPureInt(Element el, ref int max, int depth)
+        {
+            if (el == null || depth < 0)
             {
-                ClickElement(confirm, "confirm/start");
-                _confirmed = true;
-                LogMessage("AutoChooser: pressed start/confirm.");
+                return;
             }
-            else if (Settings.Debug.Value)
+
+            string t = (el.GetText(32) ?? string.Empty).Trim();
+            if (t.Length > 0 && t.Length <= 6 && Regex.IsMatch(t, @"^\d+(/\d+)?$"))
             {
-                LogMessage("AutoChooser: confirm/start button not found or not visible.");
+                int v = 0;
+                foreach (char c in t)
+                {
+                    if (char.IsDigit(c))
+                    {
+                        v = v * 10 + (c - '0');
+                    }
+                    else
+                    {
+                        break;
+                    }
+                }
+
+                if (v > max)
+                {
+                    max = v;
+                }
             }
+
+            var children = el.Children;
+            if (children == null)
+            {
+                return;
+            }
+
+            foreach (var c in children)
+            {
+                if (c is Element ce)
+                {
+                    CollectPureInt(ce, ref max, depth - 1);
+                }
+            }
+        }
+
+        private bool IsInParty()
+        {
+            try
+            {
+                var ingame = GameController?.IngameState;
+                if (ingame == null)
+                {
+                    return false;
+                }
+
+                var sdType = ingame.GetType();
+                object sd = sdType.GetProperty("ServerData")?.GetValue(ingame)
+                         ?? sdType.GetProperty("Data")?.GetValue(ingame);
+                if (sd == null)
+                {
+                    return false;
+                }
+
+                var sdProps = sd.GetType();
+
+                // Primary: your own party status ("None" => not in a party).
+                var status = sdProps.GetProperty("PartyStatusType")?.GetValue(sd);
+                if (status != null)
+                {
+                    string statusName = Enum.GetName(status.GetType(), status);
+                    if (!string.IsNullOrEmpty(statusName) && statusName != "None")
+                    {
+                        if (Settings.Debug.Value)
+                        {
+                            LogMessage($"AutoChooser: in party detected (status {statusName}).");
+                        }
+
+                        return true;
+                    }
+                }
+
+                // Fallback: count party members (>= 2 means other members are present).
+                var members = sdProps.GetProperty("PartyMembers")?.GetValue(sd) as IEnumerable;
+                if (members != null)
+                {
+                    int n = 0;
+                    foreach (var m in members)
+                    {
+                        n++;
+                        if (n >= 2)
+                        {
+                            return true;
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                LogMessage($"AutoChooser: party check failed: {ex.Message}");
+            }
+
+            return false;
         }
 
         private static List<string> ReadModifierNames(UltimatumPanel panel)
@@ -275,8 +504,14 @@ namespace AutoChooser
                 return;
             }
 
-            var window = GameController.Window.GetWindowRectangleTimeCache;
-            Vector2 topLeft = window.TopLeft;
+            var window = GameController?.Window;
+            if (window == null)
+            {
+                return;
+            }
+
+            var rectCache = window.GetWindowRectangleTimeCache;
+            Vector2 topLeft = rectCache.TopLeft;
             Vector2 center = rect.Center + topLeft;
 
             int j = Settings.ClickJitter.Value;
@@ -424,6 +659,15 @@ namespace AutoChooser
         }
 
         public ToggleNode Enable { get; set; } = new ToggleNode(false);
+
+        [Menu("This client is the party leader (picks the modifier). Uncheck to follow the party leader's vote", 0)]
+        public ToggleNode PartyLeader { get; set; } = new ToggleNode(true);
+
+        [Menu("Hotkey to pause the bot for the duration set below", 11)]
+        public HotkeyNode PauseHotkey { get; set; } = new HotkeyNode(Keys.F);
+
+        [Menu("Pause duration after the hotkey press (ms)", 12)]
+        public RangeNode<int> PauseDurationMs { get; set; } = new RangeNode<int>(6000, 500, 60000);
 
         [Menu("Only act when the game window is in the foreground (safe AFK)", 1)]
         public ToggleNode OnlyWhenGameFocused { get; set; } = new ToggleNode(true);

@@ -1,5 +1,7 @@
 # AFK Ultimatum
 
+**Version: v0.2**
+
 An [ExileApi](https://github.com/exApiTools/ExileApi-Compiled) plugin (PoE 3.28 HUD) that automatically picks one of the three **Ultimatum** reward cards by priority and presses the confirm button — using smooth, human-like mouse movement.
 
 When you enter an Ultimatum encounter, a panel appears with **three option cards in a row** and a single confirm button below them ("Begin" / "Start"). This plugin selects the most desirable card according to your priority list and clicks confirm for you, so you can AFK through Ultimatum waves.
@@ -43,6 +45,9 @@ Open the plugin settings window inside ExileApi. The following options are avail
 | Setting | Description | Default |
 |----------|-------------|---------|
 | **Enable** | Master on/off switch for the plugin. | `false` |
+| **Party Leader** | When checked, this client picks the modifier by priority (solo or as the party leader). When unchecked, the plugin is a **follower**: it waits for party votes and clicks the card with the most votes — i.e. the leader's pick, since the leader votes first and the group follows. | `true` |
+| **Pause hotkey** | Press to make the bot stop clicking/selecting for the duration below, then auto-resume. | `F` |
+| **Pause duration (ms)** | How long the bot stays paused after the hotkey is pressed. | `6000` |
 | **Force pick when all avoided** | If all 3 visible cards are set to `100` (never), pick the least-bad one anyway (so you don't get stuck). | `true` |
 | **Default priority** | Priority used for a modifier that is not in the known list. | `20` |
 | **Delay between option and start click (ms)** | Pause between clicking the card and clicking confirm. | `300` |
@@ -79,12 +84,13 @@ remaining ones the plugin picks the one with the **smallest** priority value.
 1. The plugin watches the in-game `UltimatumPanel` (strongly-typed ExileApi API).
 2. When the panel becomes visible, it waits `Settle delay` ms.
 3. It reads the three offered modifiers and looks up each one's priority.
-4. It clicks the card with the lowest priority (smooth eased movement + jitter).
+4. **Leader mode** (`Party Leader` checked): it clicks the card with the lowest
+   priority (smooth eased movement + jitter). **Follower mode** (unchecked): it waits
+   for party votes and clicks the card with the most votes (the leader's pick).
    - It checks `panel.SelectedChoice` and retries once if the selection did not register.
-5. It clicks the **confirm/start** button, then marks the round as confirmed so no
-   extra clicks happen while the panel closes.
-6. If the panel is still open afterwards (confirm did not take), it retries every
-   `Retry interval` until the panel closes.
+5. It clicks **confirm/start** on every pass. In a party the button stays disabled
+   until everyone has voted, so the click is a no-op until then and succeeds once
+   enabled; the round ends when the panel closes and the per-round state resets.
 
 Modifier names are matched by **substring** (case-insensitive), so a base name like
 `Raging Dead` also matches `Raging Dead IV`.
