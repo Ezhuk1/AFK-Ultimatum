@@ -129,17 +129,10 @@ strings depend on your client language and game patch; matching is done by subst
     priority list (solo or as party leader).
   - **Unchecked**: the plugin is a **follower** — it waits for party votes and clicks the
     card with the most votes (the leader's pick, since the leader votes first and the
-    group follows). Party detection uses `IngameState.ServerData.PartyStatusType` /
-    `PartyMembers` (the old `GameController.Party` lookup was wrong and always reported
-    "not in a party").
-  - In a party the **Confirm** button stays disabled until everyone has voted, so the
-    plugin now keeps clicking Confirm every pass until the panel closes (previously it
-    stopped after the first click and would deadlock the round).
+    group follows).
 - **Pause hotkey.** Added a configurable **Pause hotkey** (default `F`) and **Pause
   duration** (default `6000` ms). Pressing it makes the bot stop clicking/selecting for
   the set duration, then auto-resume.
-- **Robustness.** Null-safe `GameController.Window` access and a guarded `HandlePanel`
-  so a transient error during a round transition can't crash the plugin.
 
 ### v0.1
 - Initial release: automatic card selection by priority with human-like smooth mouse
