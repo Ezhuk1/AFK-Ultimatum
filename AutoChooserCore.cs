@@ -48,7 +48,12 @@ namespace AutoChooser
             if (Settings.PauseHotkey.PressedOnce())
             {
                 _pauseUntil = DateTime.UtcNow.AddMilliseconds(Settings.PauseDurationMs.Value);
+                _panelActive = false;
+                _votedThisRound = false;
+                _lastHandle = DateTime.MinValue;
+                _followerWaitStart = DateTime.MinValue;
                 LogMessage($"AutoChooser: paused for {Settings.PauseDurationMs.Value} ms.");
+                return;
             }
 
             if (DateTime.UtcNow < _pauseUntil)
@@ -204,13 +209,16 @@ namespace AutoChooser
                 return;
             }
 
-            // Cast our vote: click the chosen card. Only re-select if we haven't voted
-            // yet or the game didn't register our selection (self-healing).
-            bool needSelect = !_votedThisRound || panel.SelectedChoice != pickIndex;
+            // Cast our vote. SelectedChoice is sanity-checked: some ExileApi builds
+            // return garbage for UltimatumPanel.SelectedChoice, so we only trust it when
+            // it's in a plausible range.
+            int sel = panel.SelectedChoice;
+            bool selValid = sel >= -1 && sel < choices.Count;
+            bool needSelect = !_votedThisRound || (selValid && sel != pickIndex);
             if (needSelect)
             {
                 ClickElement(pick, $"option[{pickIndex}]");
-                if (panel.SelectedChoice != pickIndex)
+                if (selValid && panel.SelectedChoice != pickIndex)
                 {
                     if (Settings.Debug.Value)
                     {
@@ -220,8 +228,18 @@ namespace AutoChooser
                     Thread.Sleep(90);
                     ClickElement(pick, $"option[{pickIndex}] retry");
                 }
+                else if (!selValid)
+                {
+                    // Can't verify the selection -> nudge with an extra click so a single
+                    // missed click doesn't stall the round.
+                    Thread.Sleep(90);
+                    ClickElement(pick, $"option[{pickIndex}] retry");
+                }
 
-                LogMessage($"AutoChooser: selected option[{pickIndex}] '{modifierNames.ElementAtOrDefault(pickIndex)}' (priority {pickPriority}).");
+                string pickedName = pickIndex < modifierNames.Count && !string.IsNullOrWhiteSpace(modifierNames[pickIndex])
+                    ? modifierNames[pickIndex]
+                    : GetElementModifierText(pick);
+                LogMessage($"AutoChooser: selected option[{pickIndex}] '{pickedName}' (priority {pickPriority}).");
                 _votedThisRound = true;
                 Thread.Sleep(Settings.ClickDelayMs.Value);
             }
@@ -266,7 +284,16 @@ namespace AutoChooser
                     continue;
                 }
 
-                string name = i < modifierNames.Count ? modifierNames[i] : Normalize(el.GetText(1024) ?? string.Empty);
+                string name;
+                if (i < modifierNames.Count && !string.IsNullOrWhiteSpace(modifierNames[i]))
+                {
+                    name = modifierNames[i];
+                }
+                else
+                {
+                    name = GetElementModifierText(el);
+                }
+
                 int priority = GetPriority(name);
 
                 if (Settings.Debug.Value)
@@ -303,6 +330,109 @@ namespace AutoChooser
             }
 
             return (bestIndex, best, bestPriority);
+        }
+
+        // Reads a modifier name from a choice card when panel.Modifiers is empty (some
+        // ExileApi builds no longer populate it). We walk the card's element tree and
+        // return the first descendant whose visible text contains a known base mod name.
+        private string GetElementModifierText(Element el)
+        {
+            // Try Element.Text property first (works in some ExileApi builds where GetText() fails).
+            try
+            {
+                var textProp = el?.GetType().GetProperty("Text");
+                if (textProp != null)
+                {
+                    string text = textProp.GetValue(el) as string;
+                    if (!string.IsNullOrWhiteSpace(text))
+                    {
+                        string normalized = Normalize(text);
+                        if (MatchBaseMod(normalized) >= 0)
+                        {
+                            return normalized;
+                        }
+                    }
+                }
+            }
+            catch { }
+
+            // Try Element.TextNoTags property.
+            try
+            {
+                var textNoTagsProp = el?.GetType().GetProperty("TextNoTags");
+                if (textNoTagsProp != null)
+                {
+                    string text = textNoTagsProp.GetValue(el) as string;
+                    if (!string.IsNullOrWhiteSpace(text))
+                    {
+                        string normalized = Normalize(text);
+                        if (MatchBaseMod(normalized) >= 0)
+                        {
+                            return normalized;
+                        }
+                    }
+                }
+            }
+            catch { }
+
+            // Walk children using Text property.
+            string match = FindFirstMatchingChildText(el, 6);
+            if (!string.IsNullOrWhiteSpace(match))
+            {
+                return match;
+            }
+
+            return Normalize(el.GetText(4096) ?? string.Empty);
+        }
+
+        private string FindFirstMatchingChildText(Element el, int depth)
+        {
+            if (el == null || depth < 0)
+            {
+                return null;
+            }
+
+            // Try Text property first.
+            try
+            {
+                var textProp = el.GetType().GetProperty("Text");
+                if (textProp != null)
+                {
+                    string t = Normalize(textProp.GetValue(el) as string ?? string.Empty);
+                    if (!string.IsNullOrWhiteSpace(t) && MatchBaseMod(t) >= 0)
+                    {
+                        return t;
+                    }
+                }
+            }
+            catch { }
+
+            // Fallback to GetText().
+            string gt = Normalize(el.GetText(1024) ?? string.Empty);
+            if (!string.IsNullOrWhiteSpace(gt) && MatchBaseMod(gt) >= 0)
+            {
+                return gt;
+            }
+
+            var children = el.Children;
+            if (children == null)
+            {
+                return null;
+            }
+
+            foreach (var c in children)
+            {
+                if (c is Element ce)
+                {
+                    var r = FindFirstMatchingChildText(ce, depth - 1);
+                    if (!string.IsNullOrWhiteSpace(r))
+                    {
+                        return r;
+                    }
+                }
+            }
+
+            return null;
         }
 
         private int FindLeadingVoteIndex(List<Element> choices)
@@ -441,17 +571,53 @@ namespace AutoChooser
 
         private static List<string> ReadModifierNames(UltimatumPanel panel)
         {
+            // panel.Modifiers is broken in some ExileApi builds; ChoicesPanel.Modifiers works.
+            var source = panel.ChoicesPanel?.Modifiers ?? panel.Modifiers;
+            if (source == null)
+            {
+                return new List<string>(3);
+            }
+
             var names = new List<string>(3);
-            if (panel.Modifiers is IEnumerable mods)
+            if (source is IEnumerable mods)
             {
                 foreach (var m in mods)
                 {
-                    names.Add(Normalize(m?.ToString() ?? string.Empty));
+                    if (m == null)
+                    {
+                        names.Add(string.Empty);
+                        continue;
+                    }
+
+                    string name = null;
+                    var nameProp = m.GetType().GetProperty("Name");
+                    if (nameProp != null)
+                        name = nameProp.GetValue(m) as string;
+
+                    if (string.IsNullOrWhiteSpace(name))
+                    {
+                        var descProp = m.GetType().GetProperty("Description");
+                        if (descProp != null)
+                            name = descProp.GetValue(m) as string;
+                    }
+
+                    if (string.IsNullOrWhiteSpace(name))
+                    {
+                        var idProp = m.GetType().GetProperty("Id");
+                        if (idProp != null)
+                            name = idProp.GetValue(m) as string;
+                    }
+
+                    if (string.IsNullOrWhiteSpace(name))
+                        name = m.ToString();
+
+                    names.Add(Normalize(name ?? string.Empty));
                 }
             }
 
             return names;
         }
+
 
         private int GetPriority(string modifierName)
         {
@@ -636,25 +802,56 @@ namespace AutoChooser
     {
         internal static readonly string[] UltimatumMods =
         {
-            "Choking Miasma", "Stormcaller Runes", "Raging Dead", "Blistering Cold",
-            "Restless Ground", "Stalking Ruin", "Razor Dance", "Totem of Costly Might",
-            "Totem of Costly Potency", "Blood Altar", "Quicksand", "The Trialmaster",
-            "Limited Arena", "Ruin", "Reduced Recovery", "Lessened Reach",
-            "Buffs Expire Faster", "Less Cooldown Recovery", "Escalating Damage Taken",
-            "Escalating Monster Speed", "Profane Monsters", "Unlucky Criticals",
-            "Hindering Flasks", "Drought", "Ailment and Curse Reflection",
-            "Lightning Damage from Mana Costs", "Random Projectiles", "Treacherous Auras",
-            "Occasional Impotence", "Siphoned Charges", "Impurity", "Waning Spirit",
-            "Shattered Shield", "Unstoppable Monsters", "Lethal Rare Monsters",
-            "Shielding Monsters", "Precise Monsters", "Overwhelming Monsters",
-            "Deadly Monsters", "Prismatic Monsters", "Resistant Monsters",
-            "Dexterous Monsters", "Siphoning Monsters", "Putrid Monsters",
-            "Impenetrable Monsters"
+            "Ailment and Curse Reflection",
+            "Blistering Cold",
+            "Blood Altar",
+            "Buffs Expire Faster",
+            "Choking Miasma",
+            "Deadly Monsters",
+            "Dexterous Monsters",
+            "Drought",
+            "Escalating Damage Taken",
+            "Escalating Monster Speed",
+            "Hindering Flasks",
+            "Impenetrable Monsters",
+            "Impurity",
+            "Lethal Rare Monsters",
+            "Less Cooldown Recovery",
+            "Lessened Reach",
+            "Lightning Damage from Mana Costs",
+            "Limited Arena",
+            "Occasional Impotence",
+            "Overwhelming Monsters",
+            "Precise Monsters",
+            "Prismatic Monsters",
+            "Profane Monsters",
+            "Putrid Monsters",
+            "Quicksand",
+            "Raging Dead",
+            "Random Projectiles",
+            "Razor Dance",
+            "Reduced Recovery",
+            "Resistant Monsters",
+            "Restless Ground",
+            "Ruin",
+            "Shattered Shield",
+            "Shielding Monsters",
+            "Siphoned Charges",
+            "Siphoning Monsters",
+            "Stalking Ruin",
+            "Stormcaller Runes",
+            "The Trialmaster",
+            "Totem of Costly Might",
+            "Totem of Costly Potency",
+            "Treacherous Auras",
+            "Unlucky Criticals",
+            "Unstoppable Monsters",
+            "Waning Spirit"
         };
 
         public AutoChooserSettings()
         {
-            Priorities = UltimatumMods.Select(_ => "20").ToList();
+            Priorities = new List<string>(DefaultPriorities);
             OptionPriorityPanel.DrawDelegate = DrawOptionPriorities;
         }
 
@@ -706,6 +903,55 @@ namespace AutoChooser
         [JsonProperty(ObjectCreationHandling = ObjectCreationHandling.Replace)]
         public List<string> Priorities { get; set; }
 
+        private static readonly string[] DefaultPriorities =
+        {
+            "40",  //  1. Ailment and Curse Reflection
+            "30",  //  2. Blistering Cold
+            "50",  //  3. Blood Altar
+            "43",  //  4. Buffs Expire Faster
+            "37",  //  5. Choking Miasma
+            "8",   //  6. Deadly Monsters
+            "34",  //  7. Dexterous Monsters
+            "100", //  8. Drought
+            "59",  //  9. Escalating Damage Taken
+            "5",   // 10. Escalating Monster Speed
+            "14",  // 11. Hindering Flasks
+            "18",  // 12. Impenetrable Monsters
+            "58",  // 13. Impurity
+            "31",  // 14. Lethal Rare Monsters
+            "32",  // 15. Less Cooldown Recovery
+            "53",  // 16. Lessened Reach
+            "1",   // 17. Lightning Damage from Mana Costs
+            "60",  // 18. Limited Arena
+            "9",   // 19. Occasional Impotence
+            "39",  // 20. Overwhelming Monsters
+            "25",  // 21. Precise Monsters
+            "44",  // 22. Prismatic Monsters
+            "51",  // 23. Profane Monsters
+            "58",  // 24. Putrid Monsters
+            "55",  // 25. Raging Dead
+            "8",   // 26. Random Projectiles
+            "2",   // 27. Razor Dance
+            "90",  // 28. Reduced Recovery
+            "17",  // 29. Resistant Monsters
+            "10",  // 30. Restless Ground
+            "100", // 31. Ruin
+            "92",  // 32. Shattered Shield
+            "13",  // 33. Shielding Monsters
+            "58",  // 34. Siphoned Charges
+            "5",   // 35. Siphoning Monsters
+            "100", // 36. Stalking Ruin
+            "34",  // 37. Stormcaller Runes
+            "63",  // 38. The Trialmaster
+            "4",   // 39. Totem of Costly Might
+            "3",   // 40. Totem of Costly Potency
+            "11",  // 41. Treacherous Auras
+            "16",  // 42. Unlucky Criticals
+            "12",  // 43. Unstoppable Monsters
+            "24",  // 44. Waning Spirit
+            "20",  // 45. Quicksand
+        };
+
         private void DrawOptionPriorities()
         {
             if (Priorities == null)
@@ -714,6 +960,12 @@ namespace AutoChooser
             }
 
             ImGui.TextWrapped("1 = always take, higher = avoid. >= Avoid threshold = never take.");
+
+            if (ImGui.Button("Reset to defaults"))
+            {
+                Priorities = new List<string>(DefaultPriorities);
+            }
+
             int n = Math.Min(Priorities.Count, UltimatumMods.Length);
             for (int i = 0; i < n; i++)
             {

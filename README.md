@@ -1,6 +1,6 @@
 # AFK Ultimatum
 
-**Version: v2**
+**Version: v3**
 
 An [ExileApi](https://github.com/exApiTools/ExileApi-Compiled) plugin (PoE 3.28 HUD) that automatically picks one of the three **Ultimatum** reward cards by priority and presses the confirm button — using smooth, human-like mouse movement.
 
@@ -133,6 +133,20 @@ strings depend on your client language and game patch; matching is done by subst
 - **Pause hotkey.** Added a configurable **Pause hotkey** (default `F`) and **Pause
   duration** (default `6000` ms). Pressing it makes the bot stop clicking/selecting for
   the set duration, then auto-resume.
+- **Robustness.** Null-safe `GameController.Window` access and a guarded `HandlePanel`
+  so a transient error during a round transition can't crash the plugin.
+- **ExileApi-update resilience.** Some ExileApi builds no longer populate
+  `UltimatumPanel.Modifiers` (or return garbage for `SelectedChoice`). The plugin now
+  reads the modifier name from `ChoicesPanel.Modifiers` (`UltimatumModifier.Name`), with
+  `Element.Text`/`TextNoTags` subtree fallback, and only trusts `SelectedChoice` when
+  it's in a sane range — so priorities keep working after ExileApi updates.
+
+### v3
+- **Fixed modifier reading** after ExileApi update — reads names from
+  `UltimatumChoicePanel.Modifiers` via `UltimatumModifier.Name` property.
+- **Sorted modifier list** alphabetically in the settings UI.
+- **Reset to defaults** button in the priority sliders panel.
+- **Pause hotkey** now immediately stops all actions (no delayed clicks).
 
 ### v0.1
 - Initial release: automatic card selection by priority with human-like smooth mouse
