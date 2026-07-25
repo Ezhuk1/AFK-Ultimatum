@@ -91,6 +91,8 @@ remaining ones the plugin picks the one with the **smallest** priority value.
 5. It clicks **confirm/start** on every pass. In a party the button stays disabled
    until everyone has voted, so the click is a no-op until then and succeeds once
    enabled; the round ends when the panel closes and the per-round state resets.
+6. If the panel is visible but has **no choice cards** (e.g. "Begin" / "Next wave"
+   screen), the plugin clicks confirm automatically.
 
 Modifier names are matched by **substring** (case-insensitive), so a base name like
 `Raging Dead` also matches `Raging Dead IV`.
@@ -122,6 +124,9 @@ strings depend on your client language and game patch; matching is done by subst
 ---
 
 ## Changelog
+
+### v3.1
+- Auto-clicks confirm on modifier-less panels ("Begin" / "Next wave" screens).
 
 ### v2
 - **Party play.** Added the **Party Leader** setting:

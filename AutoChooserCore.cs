@@ -136,7 +136,13 @@ namespace AutoChooser
 
             if (choices.Count == 0)
             {
-                LogMessage("AutoChooser: Ultimatum panel visible but no choice elements found.");
+                // No choice cards — may be a "Begin" / "Next wave" screen with just a confirm button.
+                if (panel.ConfirmButton is Element confirm2 && confirm2.IsValid && confirm2.IsVisible)
+                {
+                    ClickElement(confirm2, "confirm/begin");
+                    LogMessage("AutoChooser: no choices visible, pressed confirm/begin.");
+                }
+
                 return;
             }
 
