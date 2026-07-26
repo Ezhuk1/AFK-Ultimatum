@@ -36,16 +36,20 @@ namespace AutoChooser
             return true;
         }
 
+        private bool _pauseHotkeyWasPressed;
+
         public override void Render()
         {
             if (!Settings.Enable.Value)
             {
                 _panelActive = false;
                 _pauseUntil = DateTime.MinValue;
+                _pauseHotkeyWasPressed = false;
                 return;
             }
 
-            if (Settings.PauseHotkey.PressedOnce())
+            bool hotkeyDown = Settings.PauseHotkey.IsPressed();
+            if (hotkeyDown && !_pauseHotkeyWasPressed)
             {
                 _pauseUntil = DateTime.UtcNow.AddMilliseconds(Settings.PauseDurationMs.Value);
                 _panelActive = false;
@@ -53,8 +57,10 @@ namespace AutoChooser
                 _lastHandle = DateTime.MinValue;
                 _followerWaitStart = DateTime.MinValue;
                 LogMessage($"AutoChooser: paused for {Settings.PauseDurationMs.Value} ms.");
+                _pauseHotkeyWasPressed = true;
                 return;
             }
+            _pauseHotkeyWasPressed = hotkeyDown;
 
             if (DateTime.UtcNow < _pauseUntil)
             {
