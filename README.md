@@ -132,6 +132,7 @@ its own entry, not the base `"Blistering Cold"`.
 - Added tiered modifier variants (II, III, IV) with separate priority sliders.
 - `MatchBaseMod` now uses longest-substring matching so `"Blistering Cold IV"` doesn't
   accidentally match the base `"Blistering Cold"` entry.
+- Pause hotkey now stops the bot instantly — checked inside mouse movement and sleep loops.
 
 ### v2
 - **Party play.** Added the **Party Leader** setting:

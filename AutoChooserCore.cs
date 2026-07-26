@@ -943,13 +943,13 @@ namespace AutoChooser
             "100", //  5. Blistering Cold IV
             "50",  //  6. Blood Altar
             "43",  //  7. Buffs Expire Faster
-            "37",  //  8. Choking Miasma
-            "10",  //  9. Choking Miasma II
-            "50",  // 10. Choking Miasma III
+            "100", //  8. Choking Miasma
+            "100", //  9. Choking Miasma II
+            "100", // 10. Choking Miasma III
             "100", // 11. Choking Miasma IV
             "8",   // 12. Deadly Monsters
             "34",  // 13. Dexterous Monsters
-            "100", // 14. Drought
+            "31",  // 14. Drought
             "59",  // 15. Escalating Damage Taken
             "5",   // 16. Escalating Monster Speed
             "14",  // 17. Hindering Flasks
@@ -964,11 +964,11 @@ namespace AutoChooser
             "39",  // 26. Overwhelming Monsters
             "25",  // 27. Precise Monsters
             "44",  // 28. Prismatic Monsters
-            "51",  // 29. Profane Monsters
+            "100", // 29. Profane Monsters
             "58",  // 30. Putrid Monsters
             "20",  // 31. Quicksand
             "10",  // 32. Quicksand II
-            "50",  // 33. Quicksand III
+            "100", // 33. Quicksand III
             "100", // 34. Quicksand IV
             "55",  // 35. Raging Dead
             "10",  // 36. Raging Dead II
@@ -983,7 +983,7 @@ namespace AutoChooser
             "17",  // 45. Resistant Monsters
             "10",  // 46. Restless Ground
             "10",  // 47. Restless Ground II
-            "50",  // 48. Restless Ground III
+            "100", // 48. Restless Ground III
             "100", // 49. Restless Ground IV
             "100", // 50. Ruin
             "92",  // 51. Shattered Shield
@@ -991,8 +991,8 @@ namespace AutoChooser
             "58",  // 53. Siphoned Charges
             "5",   // 54. Siphoning Monsters
             "100", // 55. Stalking Ruin
-            "10",  // 56. Stalking Ruin II
-            "50",  // 57. Stalking Ruin III
+            "100", // 56. Stalking Ruin II
+            "100", // 57. Stalking Ruin III
             "100", // 58. Stalking Ruin IV
             "34",  // 59. Stormcaller Runes
             "10",  // 60. Stormcaller Runes II
