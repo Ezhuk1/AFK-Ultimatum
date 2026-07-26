@@ -43,7 +43,7 @@ namespace AutoChooser
 
         private bool CheckPauseHotkey()
         {
-            int vk = (int)Settings.PauseHotkey.Value.Key;
+            int vk = (int)(Keys)Settings.PauseHotkey.Value;
             bool hotkeyDown = (GetAsyncKeyState(vk) & 0x8000) != 0;
             if (hotkeyDown && !_pauseHotkeyWasPressed)
             {
