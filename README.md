@@ -11,7 +11,7 @@ When you enter an Ultimatum encounter, a panel appears with **three option cards
 ## Features
 
 - **Automatic card selection** — picks the visible card with the **lowest** priority value.
-- **Per-modifier priority sliders** — 45 Ultimatum modifiers, each with a `1–100` slider.
+- **Per-modifier priority sliders** — 69 Ultimatum modifiers (including tiered II/III/IV variants), each with a `1–100` slider.
   - `1` = always take this card.
   - higher = less desirable.
   - `>= Avoid threshold` = never take this card.
@@ -101,8 +101,10 @@ Modifier names are matched by **substring** (case-insensitive), so a base name l
 
 ## Known Ultimatum modifiers
 
-These names are pre-populated in the priority list (default priority `20`). Exact
-strings depend on your client language and game patch; matching is done by substring.
+These names are pre-populated in the priority list. Tiered variants (II, III, IV) have
+separate priority sliders so you can, for example, take tier I-II but skip tier III-IV.
+Matching uses the longest (most specific) substring, so `"Blistering Cold IV"` matches
+its own entry, not the base `"Blistering Cold"`.
 
 | Category | Names (English) |
 |----------|------------------|
@@ -127,6 +129,9 @@ strings depend on your client language and game patch; matching is done by subst
 
 ### v3.1
 - Auto-clicks confirm on modifier-less panels ("Begin" / "Next wave" screens).
+- Added tiered modifier variants (II, III, IV) with separate priority sliders.
+- `MatchBaseMod` now uses longest-substring matching so `"Blistering Cold IV"` doesn't
+  accidentally match the base `"Blistering Cold"` entry.
 
 ### v2
 - **Party play.** Added the **Party Leader** setting:

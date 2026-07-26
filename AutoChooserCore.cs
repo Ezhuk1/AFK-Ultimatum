@@ -651,6 +651,9 @@ namespace AutoChooser
                 return -1;
             }
 
+            int bestIdx = -1;
+            int bestLen = 0;
+
             for (int i = 0; i < AutoChooserSettings.UltimatumMods.Length; i++)
             {
                 string baseName = Normalize(AutoChooserSettings.UltimatumMods[i]);
@@ -659,13 +662,14 @@ namespace AutoChooser
                     continue;
                 }
 
-                if (norm.IndexOf(baseName, StringComparison.OrdinalIgnoreCase) >= 0)
+                if (baseName.Length > bestLen && norm.IndexOf(baseName, StringComparison.OrdinalIgnoreCase) >= 0)
                 {
-                    return i;
+                    bestLen = baseName.Length;
+                    bestIdx = i;
                 }
             }
 
-            return -1;
+            return bestIdx;
         }
 
         private void ClickElement(Element el, string label)
@@ -809,10 +813,10 @@ namespace AutoChooser
         internal static readonly string[] UltimatumMods =
         {
             "Ailment and Curse Reflection",
-            "Blistering Cold",
+            "Blistering Cold", "Blistering Cold II", "Blistering Cold III", "Blistering Cold IV",
             "Blood Altar",
             "Buffs Expire Faster",
-            "Choking Miasma",
+            "Choking Miasma", "Choking Miasma II", "Choking Miasma III", "Choking Miasma IV",
             "Deadly Monsters",
             "Dexterous Monsters",
             "Drought",
@@ -832,20 +836,20 @@ namespace AutoChooser
             "Prismatic Monsters",
             "Profane Monsters",
             "Putrid Monsters",
-            "Quicksand",
-            "Raging Dead",
+            "Quicksand", "Quicksand II", "Quicksand III", "Quicksand IV",
+            "Raging Dead", "Raging Dead II", "Raging Dead III", "Raging Dead IV",
             "Random Projectiles",
-            "Razor Dance",
+            "Razor Dance", "Razor Dance II", "Razor Dance III", "Razor Dance IV",
             "Reduced Recovery",
             "Resistant Monsters",
-            "Restless Ground",
+            "Restless Ground", "Restless Ground II", "Restless Ground III", "Restless Ground IV",
             "Ruin",
             "Shattered Shield",
             "Shielding Monsters",
             "Siphoned Charges",
             "Siphoning Monsters",
-            "Stalking Ruin",
-            "Stormcaller Runes",
+            "Stalking Ruin", "Stalking Ruin II", "Stalking Ruin III", "Stalking Ruin IV",
+            "Stormcaller Runes", "Stormcaller Runes II", "Stormcaller Runes III", "Stormcaller Runes IV",
             "The Trialmaster",
             "Totem of Costly Might",
             "Totem of Costly Potency",
@@ -913,49 +917,73 @@ namespace AutoChooser
         {
             "40",  //  1. Ailment and Curse Reflection
             "30",  //  2. Blistering Cold
-            "50",  //  3. Blood Altar
-            "43",  //  4. Buffs Expire Faster
-            "37",  //  5. Choking Miasma
-            "8",   //  6. Deadly Monsters
-            "34",  //  7. Dexterous Monsters
-            "100", //  8. Drought
-            "59",  //  9. Escalating Damage Taken
-            "5",   // 10. Escalating Monster Speed
-            "14",  // 11. Hindering Flasks
-            "18",  // 12. Impenetrable Monsters
-            "58",  // 13. Impurity
-            "31",  // 14. Lethal Rare Monsters
-            "32",  // 15. Less Cooldown Recovery
-            "53",  // 16. Lessened Reach
-            "1",   // 17. Lightning Damage from Mana Costs
-            "60",  // 18. Limited Arena
-            "9",   // 19. Occasional Impotence
-            "39",  // 20. Overwhelming Monsters
-            "25",  // 21. Precise Monsters
-            "44",  // 22. Prismatic Monsters
-            "51",  // 23. Profane Monsters
-            "58",  // 24. Putrid Monsters
-            "55",  // 25. Raging Dead
-            "8",   // 26. Random Projectiles
-            "2",   // 27. Razor Dance
-            "90",  // 28. Reduced Recovery
-            "17",  // 29. Resistant Monsters
-            "10",  // 30. Restless Ground
-            "100", // 31. Ruin
-            "92",  // 32. Shattered Shield
-            "13",  // 33. Shielding Monsters
-            "58",  // 34. Siphoned Charges
-            "5",   // 35. Siphoning Monsters
-            "100", // 36. Stalking Ruin
-            "34",  // 37. Stormcaller Runes
-            "63",  // 38. The Trialmaster
-            "4",   // 39. Totem of Costly Might
-            "3",   // 40. Totem of Costly Potency
-            "11",  // 41. Treacherous Auras
-            "16",  // 42. Unlucky Criticals
-            "12",  // 43. Unstoppable Monsters
-            "24",  // 44. Waning Spirit
-            "20",  // 45. Quicksand
+            "10",  //  3. Blistering Cold II
+            "50",  //  4. Blistering Cold III
+            "100", //  5. Blistering Cold IV
+            "50",  //  6. Blood Altar
+            "43",  //  7. Buffs Expire Faster
+            "37",  //  8. Choking Miasma
+            "10",  //  9. Choking Miasma II
+            "50",  // 10. Choking Miasma III
+            "100", // 11. Choking Miasma IV
+            "8",   // 12. Deadly Monsters
+            "34",  // 13. Dexterous Monsters
+            "100", // 14. Drought
+            "59",  // 15. Escalating Damage Taken
+            "5",   // 16. Escalating Monster Speed
+            "14",  // 17. Hindering Flasks
+            "18",  // 18. Impenetrable Monsters
+            "58",  // 19. Impurity
+            "31",  // 20. Lethal Rare Monsters
+            "32",  // 21. Less Cooldown Recovery
+            "53",  // 22. Lessened Reach
+            "1",   // 23. Lightning Damage from Mana Costs
+            "60",  // 24. Limited Arena
+            "9",   // 25. Occasional Impotence
+            "39",  // 26. Overwhelming Monsters
+            "25",  // 27. Precise Monsters
+            "44",  // 28. Prismatic Monsters
+            "51",  // 29. Profane Monsters
+            "58",  // 30. Putrid Monsters
+            "20",  // 31. Quicksand
+            "10",  // 32. Quicksand II
+            "50",  // 33. Quicksand III
+            "100", // 34. Quicksand IV
+            "55",  // 35. Raging Dead
+            "10",  // 36. Raging Dead II
+            "50",  // 37. Raging Dead III
+            "100", // 38. Raging Dead IV
+            "8",   // 39. Random Projectiles
+            "2",   // 40. Razor Dance
+            "10",  // 41. Razor Dance II
+            "50",  // 42. Razor Dance III
+            "100", // 43. Razor Dance IV
+            "90",  // 44. Reduced Recovery
+            "17",  // 45. Resistant Monsters
+            "10",  // 46. Restless Ground
+            "10",  // 47. Restless Ground II
+            "50",  // 48. Restless Ground III
+            "100", // 49. Restless Ground IV
+            "100", // 50. Ruin
+            "92",  // 51. Shattered Shield
+            "13",  // 52. Shielding Monsters
+            "58",  // 53. Siphoned Charges
+            "5",   // 54. Siphoning Monsters
+            "100", // 55. Stalking Ruin
+            "10",  // 56. Stalking Ruin II
+            "50",  // 57. Stalking Ruin III
+            "100", // 58. Stalking Ruin IV
+            "34",  // 59. Stormcaller Runes
+            "10",  // 60. Stormcaller Runes II
+            "50",  // 61. Stormcaller Runes III
+            "100", // 62. Stormcaller Runes IV
+            "63",  // 63. The Trialmaster
+            "4",   // 64. Totem of Costly Might
+            "3",   // 65. Totem of Costly Potency
+            "11",  // 66. Treacherous Auras
+            "16",  // 67. Unlucky Criticals
+            "12",  // 68. Unstoppable Monsters
+            "24",  // 69. Waning Spirit
         };
 
         private void DrawOptionPriorities()
