@@ -38,6 +38,24 @@ namespace AutoChooser
 
         private bool _pauseHotkeyWasPressed;
 
+        private bool CheckPauseHotkey()
+        {
+            bool hotkeyDown = Settings.PauseHotkey.IsPressed();
+            if (hotkeyDown && !_pauseHotkeyWasPressed)
+            {
+                _pauseUntil = DateTime.UtcNow.AddMilliseconds(Settings.PauseDurationMs.Value);
+                _panelActive = false;
+                _votedThisRound = false;
+                _lastHandle = DateTime.MinValue;
+                _followerWaitStart = DateTime.MinValue;
+                _pauseHotkeyWasPressed = true;
+                LogMessage($"AutoChooser: paused for {Settings.PauseDurationMs.Value} ms.");
+                return true;
+            }
+            _pauseHotkeyWasPressed = hotkeyDown;
+            return false;
+        }
+
         public override void Render()
         {
             if (!Settings.Enable.Value)
@@ -48,19 +66,7 @@ namespace AutoChooser
                 return;
             }
 
-            bool hotkeyDown = Settings.PauseHotkey.IsPressed();
-            if (hotkeyDown && !_pauseHotkeyWasPressed)
-            {
-                _pauseUntil = DateTime.UtcNow.AddMilliseconds(Settings.PauseDurationMs.Value);
-                _panelActive = false;
-                _votedThisRound = false;
-                _lastHandle = DateTime.MinValue;
-                _followerWaitStart = DateTime.MinValue;
-                LogMessage($"AutoChooser: paused for {Settings.PauseDurationMs.Value} ms.");
-                _pauseHotkeyWasPressed = true;
-                return;
-            }
-            _pauseHotkeyWasPressed = hotkeyDown;
+            CheckPauseHotkey();
 
             if (DateTime.UtcNow < _pauseUntil)
             {
@@ -230,6 +236,7 @@ namespace AutoChooser
             if (needSelect)
             {
                 ClickElement(pick, $"option[{pickIndex}]");
+                if (DateTime.UtcNow < _pauseUntil) { _votedThisRound = false; return; }
                 if (selValid && panel.SelectedChoice != pickIndex)
                 {
                     if (Settings.Debug.Value)
@@ -238,6 +245,8 @@ namespace AutoChooser
                     }
 
                     Thread.Sleep(90);
+                    CheckPauseHotkey();
+                    if (DateTime.UtcNow < _pauseUntil) { _votedThisRound = false; return; }
                     ClickElement(pick, $"option[{pickIndex}] retry");
                 }
                 else if (!selValid)
@@ -245,6 +254,8 @@ namespace AutoChooser
                     // Can't verify the selection -> nudge with an extra click so a single
                     // missed click doesn't stall the round.
                     Thread.Sleep(90);
+                    CheckPauseHotkey();
+                    if (DateTime.UtcNow < _pauseUntil) { _votedThisRound = false; return; }
                     ClickElement(pick, $"option[{pickIndex}] retry");
                 }
 
@@ -710,6 +721,7 @@ namespace AutoChooser
             try
             {
                 MoveMouseSmooth(x, y);
+                if (DateTime.UtcNow < _pauseUntil) return;
                 Thread.Sleep(20 + _rng.Next(0, 40));
                 NativeMouse.LeftClick();
             }
@@ -744,6 +756,9 @@ namespace AutoChooser
 
             for (int s = 1; s <= steps; s++)
             {
+                CheckPauseHotkey();
+                if (DateTime.UtcNow < _pauseUntil) return;
+
                 double t = (double)s / steps;
                 double e = t < 0.5 ? 2 * t * t : 1 - Math.Pow(-2 * t + 2, 2) / 2;
                 int x = sx + (int)Math.Round(dx * e);
