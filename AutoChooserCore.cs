@@ -38,9 +38,13 @@ namespace AutoChooser
 
         private bool _pauseHotkeyWasPressed;
 
+        [DllImport("user32.dll")]
+        private static extern short GetAsyncKeyState(int vKey);
+
         private bool CheckPauseHotkey()
         {
-            bool hotkeyDown = Settings.PauseHotkey.IsPressed();
+            int vk = (int)Settings.PauseHotkey.Value.Key;
+            bool hotkeyDown = (GetAsyncKeyState(vk) & 0x8000) != 0;
             if (hotkeyDown && !_pauseHotkeyWasPressed)
             {
                 _pauseUntil = DateTime.UtcNow.AddMilliseconds(Settings.PauseDurationMs.Value);
@@ -949,7 +953,7 @@ namespace AutoChooser
             "100", // 11. Choking Miasma IV
             "8",   // 12. Deadly Monsters
             "34",  // 13. Dexterous Monsters
-            "31",  // 14. Drought
+            "100", // 14. Drought
             "59",  // 15. Escalating Damage Taken
             "5",   // 16. Escalating Monster Speed
             "14",  // 17. Hindering Flasks
