@@ -10,6 +10,7 @@ using ExileCore;
 using ExileCore.PoEMemory;
 using ExileCore.PoEMemory.Elements;
 using ExileCore.Shared.Attributes;
+using ExileCore.Shared.Enums;
 using ExileCore.Shared.Interfaces;
 using ExileCore.Shared.Nodes;
 using ImGuiNET;
@@ -94,6 +95,11 @@ namespace AutoChooser
                 if (panel != null && panel.IsVisible)
                 {
                     _lootPhaseActive = false;
+                    return;
+                }
+
+                if (HasNearbyHostileMonsters())
+                {
                     return;
                 }
 
@@ -747,6 +753,33 @@ namespace AutoChooser
             }
 
             return bestIdx;
+        }
+
+        private const float MonsterProximityDistance = 200f;
+
+        private bool HasNearbyHostileMonsters()
+        {
+            try
+            {
+                var entities = GameController?.EntityListWrapper?.OnlyValidEntities;
+                if (entities == null) return false;
+
+                foreach (var entity in entities)
+                {
+                    if (entity == null || !entity.IsValid) continue;
+                    if (entity.Type != EntityType.Monster) continue;
+                    if (!entity.IsAlive || !entity.IsHostile) continue;
+
+                    float dist = entity.DistancePlayer;
+                    if (dist > 0f && dist < MonsterProximityDistance)
+                        return true;
+                }
+            }
+            catch
+            {
+            }
+
+            return false;
         }
 
         private void TryPickupLoot()
