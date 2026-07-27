@@ -83,6 +83,35 @@ namespace AutoChooser
             }
 
             var panel = GameController?.IngameState?.IngameUi?.UltimatumPanel;
+
+            // Loot pickup phase: panel is gone, click visible ground items.
+            if (_lootPhaseActive)
+            {
+                if (panel != null && panel.IsVisible)
+                {
+                    // New ultimatum started — stop looting.
+                    _lootPhaseActive = false;
+                    return;
+                }
+
+                DateTime lootNow = DateTime.UtcNow;
+
+                if ((lootNow - _lootPhaseStart).TotalMilliseconds >= Settings.LootPickupTimeoutMs.Value)
+                {
+                    _lootPhaseActive = false;
+                    LogMessage("AutoChooser: loot pickup ended (timeout).");
+                    return;
+                }
+
+                if ((lootNow - _lastLootClick).TotalMilliseconds >= Settings.LootPickupIntervalMs.Value)
+                {
+                    _lastLootClick = lootNow;
+                    TryPickupLoot();
+                }
+
+                return;
+            }
+
             if (panel == null || !panel.IsVisible)
             {
                 // Panel closed: if we were active, enter loot pickup phase.
@@ -101,32 +130,6 @@ namespace AutoChooser
                 return;
             }
 
-            // Loot pickup phase: click visible ground labels until timeout.
-            if (_lootPhaseActive)
-            {
-                if (DateTime.UtcNow < _pauseUntil)
-                {
-                    return;
-                }
-
-                DateTime lootNow = DateTime.UtcNow;
-
-                if ((lootNow - _lootPhaseStart).TotalMilliseconds >= Settings.LootPickupTimeoutMs.Value)
-                {
-                    _lootPhaseActive = false;
-                    LogMessage("AutoChooser: loot pickup phase ended (timeout).");
-                    return;
-                }
-
-                if ((lootNow - _lastLootClick).TotalMilliseconds >= Settings.LootPickupIntervalMs.Value)
-                {
-                    _lastLootClick = lootNow;
-                    TryPickupLoot();
-                }
-
-                return;
-            }
-
             DateTime now = DateTime.UtcNow;
 
             // Edge-detect the open: the first frame the panel becomes visible we just
@@ -135,7 +138,6 @@ namespace AutoChooser
             {
                 _panelActive = true;
                 _panelOpenTime = now;
-                _lootPhaseActive = false;
                 return;
             }
 
