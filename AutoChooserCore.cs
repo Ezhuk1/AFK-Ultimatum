@@ -33,7 +33,7 @@ namespace AutoChooser
         private bool _lootPhaseActive;
         private DateTime _lootPhaseStart = DateTime.MinValue;
         private DateTime _lastLootClick = DateTime.MinValue;
-        private DateTime _panelClosedTime = DateTime.MinValue;
+        private DateTime _lastPanelVisibleTime = DateTime.MinValue;
         private bool _lootPending;
 
         public override bool Initialise()
@@ -94,8 +94,10 @@ namespace AutoChooser
             {
                 if (panel != null && panel.IsVisible)
                 {
+                    // Panel came back — stop looting.
                     _lootPhaseActive = false;
                     _lootPending = false;
+                    _lastPanelVisibleTime = DateTime.UtcNow;
                     return;
                 }
 
@@ -118,7 +120,13 @@ namespace AutoChooser
                 return;
             }
 
-            // Waiting for grace delay: panel is still gone, don't loot yet.
+            // Track when the panel was last visible.
+            if (panel != null && panel.IsVisible)
+            {
+                _lastPanelVisibleTime = DateTime.UtcNow;
+            }
+
+            // Loot pending: panel was closed, waiting to see if it comes back.
             if (_lootPending)
             {
                 if (panel != null && panel.IsVisible)
@@ -130,7 +138,9 @@ namespace AutoChooser
                     return;
                 }
 
-                if ((DateTime.UtcNow - _panelClosedTime).TotalMilliseconds >= Settings.LootStartDelayMs.Value)
+                // Only start loot if panel hasn't been visible for the full delay.
+                double sinceLastSeen = (DateTime.UtcNow - _lastPanelVisibleTime).TotalMilliseconds;
+                if (sinceLastSeen >= Settings.LootStartDelayMs.Value)
                 {
                     _lootPending = false;
                     if (Settings.LootPickupEnabled.Value)
@@ -138,7 +148,7 @@ namespace AutoChooser
                         _lootPhaseActive = true;
                         _lootPhaseStart = DateTime.UtcNow;
                         _lastLootClick = DateTime.MinValue;
-                        LogMessage("AutoChooser: grace delay passed, starting loot pickup.");
+                        LogMessage("AutoChooser: panel gone long enough, starting loot pickup.");
                     }
                 }
 
@@ -147,11 +157,11 @@ namespace AutoChooser
 
             if (panel == null || !panel.IsVisible)
             {
-                // Panel just closed — start grace delay.
+                // Panel closed — start grace delay.
                 if (_panelActive && Settings.LootPickupEnabled.Value && !_lootPending)
                 {
                     _lootPending = true;
-                    _panelClosedTime = DateTime.UtcNow;
+                    _lastPanelVisibleTime = DateTime.UtcNow;
                     LogMessage("AutoChooser: panel closed, waiting before loot pickup.");
                 }
 
