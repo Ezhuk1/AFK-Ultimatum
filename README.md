@@ -61,6 +61,7 @@ Open the plugin settings window inside ExileApi. The following options are avail
 | **Loot pickup timeout (ms)** | Max time for loot phase. | `8000` |
 | **Loot pickup interval (ms)** | Delay between loot clicks. | `200` |
 | **Loot pickup max distance** | Max distance from player to pick up items (px). | `300` |
+| **Loot start delay (ms)** | How long to wait after the panel disappears before starting loot pickup. Prevents looting between waves. | `3000` |
 
 ### Priority sliders
 
