@@ -150,6 +150,7 @@ namespace AutoChooser
                 {
                     if (IsUltimatumEncounterActive())
                     {
+                        _panelWasVisible = false;
                         return;
                     }
 
