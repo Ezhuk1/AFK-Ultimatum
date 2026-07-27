@@ -1,6 +1,7 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
@@ -8,7 +9,9 @@ using System.Threading;
 using System.Windows.Forms;
 using ExileCore;
 using ExileCore.PoEMemory;
+using ExileCore.PoEMemory.Components;
 using ExileCore.PoEMemory.Elements;
+using ExileCore.PoEMemory.MemoryObjects;
 using ExileCore.Shared.Attributes;
 using ExileCore.Shared.Enums;
 using ExileCore.Shared.Interfaces;
@@ -32,9 +35,31 @@ namespace AutoChooser
         private const int FollowerTimeoutMs = 6000;
 
         private bool _lootPhaseActive;
+        private bool _lootPending;
+        private DateTime _lootPendingStart = DateTime.MinValue;
+        private DateTime _lootPanelGoneSince = DateTime.MinValue;
+        private DateTime _lootPanelBackSince = DateTime.MinValue;
         private DateTime _lootPhaseStart = DateTime.MinValue;
         private DateTime _lastLootClick = DateTime.MinValue;
-        private bool _panelWasVisible;
+        private DateTime _lastLootItemSeen = DateTime.MinValue;
+        private DateTime _lastMonsterCheck = DateTime.MinValue;
+        private DateTime _lastLootPendingLog = DateTime.MinValue;
+        private DateTime _lastLootAvailCheck = DateTime.MinValue;
+        private bool _lootAvailCache;
+        private bool _monstersNearbyCache;
+        private uint _lootAreaHash;
+        private DateTime _lastLootBlockLog = DateTime.MinValue;
+        private System.Numerics.Vector2? _lootAnchor;
+        private const int MonsterCheckIntervalMs = 250;
+        private const int LootNoItemsGraceMs = 2500;
+        private const int LootPendingMaxMs = 300000;
+        private const int LootPanelBackDebounceMs = 1500;
+        private const int LootAvailCheckIntervalMs = 300;
+        private readonly Dictionary<long, int> _lootHoverFailures = new();
+        private const int LootHoverTimeoutMs = 150;
+        private const int LootHoverPollMs = 10;
+        private const int LootMaxHoverFailures = 3;
+        private const float LootEdgeMarginPx = 36f;
 
         public override bool Initialise()
         {
@@ -56,6 +81,10 @@ namespace AutoChooser
                 _pauseUntil = DateTime.UtcNow.AddMilliseconds(Settings.PauseDurationMs.Value);
                 _panelActive = false;
                 _lootPhaseActive = false;
+                _lootPending = false;
+                _lootPanelGoneSince = DateTime.MinValue;
+                _lootPanelBackSince = DateTime.MinValue;
+                _lootAnchor = null;
                 _votedThisRound = false;
                 _lastHandle = DateTime.MinValue;
                 _followerWaitStart = DateTime.MinValue;
@@ -73,7 +102,10 @@ namespace AutoChooser
             {
                 _panelActive = false;
                 _lootPhaseActive = false;
-                _panelWasVisible = false;
+                _lootPending = false;
+                _lootPanelGoneSince = DateTime.MinValue;
+                _lootPanelBackSince = DateTime.MinValue;
+                _lootAnchor = null;
                 _pauseUntil = DateTime.MinValue;
                 _pauseHotkeyWasPressed = false;
                 return;
@@ -87,47 +119,198 @@ namespace AutoChooser
             }
 
             var panel = GameController?.IngameState?.IngameUi?.UltimatumPanel;
+            bool panelVisible = panel != null && panel.IsVisible;
+            DateTime now = DateTime.UtcNow;
 
             // Loot pickup phase: panel is gone, click visible ground items.
             if (_lootPhaseActive)
             {
-                if (panel != null && panel.IsVisible)
+                if (panelVisible)
                 {
                     _lootPhaseActive = false;
                     return;
                 }
 
-                if (HasNearbyHostileMonsters())
+                // Don't go hunting stray map loot after leaving the arena.
+                if (LootAreaChanged())
                 {
+                    _lootPhaseActive = false;
+                    _lootPending = false;
+                    LogMessage("AutoChooser: area changed, loot pickup cancelled.");
                     return;
                 }
 
-                DateTime lootNow = DateTime.UtcNow;
+                if (LeftLootAnchor())
+                {
+                    _lootPhaseActive = false;
+                    _lootPending = false;
+                    _lootAnchor = null;
+                    LogMessage("AutoChooser: walked away from the ultimatum, loot pickup cancelled.");
+                    return;
+                }
 
-                if ((lootNow - _lootPhaseStart).TotalMilliseconds >= Settings.LootPickupTimeoutMs.Value)
+                // Same safe-AFK guard as panel handling: don't hijack the cursor
+                // while you are using another window.
+                if (Settings.OnlyWhenGameFocused.Value)
+                {
+                    var lootWindow = GameController?.Window;
+                    if (lootWindow == null || !lootWindow.IsForeground())
+                    {
+                        return;
+                    }
+                }
+
+                if ((now - _lootPhaseStart).TotalMilliseconds >= Settings.LootPickupTimeoutMs.Value)
                 {
                     _lootPhaseActive = false;
                     LogMessage("AutoChooser: loot pickup ended (timeout).");
+                    RearmLootPending();
                     return;
                 }
 
-                if ((lootNow - _lastLootClick).TotalMilliseconds >= Settings.LootPickupIntervalMs.Value)
+                // Nothing to click for a while -> rewards picked up (or none dropped), stop early.
+                if ((now - _lastLootItemSeen).TotalMilliseconds >= LootNoItemsGraceMs)
                 {
-                    _lastLootClick = lootNow;
-                    TryPickupLoot();
+                    _lootPhaseActive = false;
+                    LogMessage("AutoChooser: loot pickup ended (no more items).");
+                    RearmLootPending();
+                    return;
+                }
+
+                if ((now - _lastLootClick).TotalMilliseconds >= Settings.LootPickupIntervalMs.Value)
+                {
+                    _lastLootClick = now;
+                    if (MonstersNearby(now))
+                    {
+                        // Hostiles close by: wait them out instead of clicking.
+                        // Treat it as activity so the quiet-grace above doesn't kill
+                        // the phase while we are deliberately not clicking.
+                        _lastLootItemSeen = now;
+                        if (Settings.Debug.Value && (now - _lastLootBlockLog).TotalMilliseconds >= 2000)
+                        {
+                            _lastLootBlockLog = now;
+                            LogMessage($"AutoChooser: loot clicks paused - {DescribeNearestHostile()}.");
+                        }
+                    }
+                    else if (TryPickupLoot())
+                    {
+                        _lastLootItemSeen = now;
+                    }
                 }
 
                 return;
             }
 
-            if (panel == null || !panel.IsVisible)
+            // Pending loot: the panel closed after being handled. That happens after
+            // every confirmed card (wave start) AND when the encounter ends. The old
+            // "no monsters nearby for N seconds" requirement never holds in a live
+            // map (stray monsters wander near the arena), so the loot phase now
+            // starts once the panel has stayed gone long enough AND pickable loot
+            // is actually visible on the ground - monsters only gate the clicks
+            // themselves inside the loot phase.
+            if (_lootPending)
+            {
+                if (panelVisible)
+                {
+                    // Debounce: a one-frame panel flash (reward UI) must not cancel
+                    // looting; only a panel that STAYS visible (next wave) does.
+                    // While it is visible we fall through so normal card handling
+                    // keeps working instead of stalling for the debounce window.
+                    if (_lootPanelBackSince == DateTime.MinValue)
+                    {
+                        _lootPanelBackSince = now;
+                    }
+
+                    if ((now - _lootPanelBackSince).TotalMilliseconds >= LootPanelBackDebounceMs)
+                    {
+                        _lootPending = false;
+                        _lootPanelBackSince = DateTime.MinValue;
+                        _lootPanelGoneSince = DateTime.MinValue;
+                        LogMessage("AutoChooser: panel reappeared - it was an inter-wave close, loot pending cancelled.");
+                    }
+                    // fall through to panel handling below
+                }
+                else
+                {
+                    _lootPanelBackSince = DateTime.MinValue;
+
+                    // The per-round reset that lives in the !panelVisible block below
+                    // must also run while loot waiting spans the whole wave - otherwise
+                    // _votedThisRound stays true from the last vote, the next panel is
+                    // never voted on and the bot gets stuck clicking a disabled confirm.
+                    _panelActive = false;
+                    _votedThisRound = false;
+                    _lastHandle = DateTime.MinValue;
+                    _followerWaitStart = DateTime.MinValue;
+
+                    if (LootAreaChanged())
+                    {
+                        _lootPending = false;
+                        LogMessage("AutoChooser: area changed, loot pending cancelled.");
+                        return;
+                    }
+
+                    if (LeftLootAnchor())
+                    {
+                        _lootPending = false;
+                        _lootAnchor = null;
+                        LogMessage("AutoChooser: walked away from the ultimatum, loot pending cancelled.");
+                        return;
+                    }
+
+                    if ((now - _lootPendingStart).TotalMilliseconds >= LootPendingMaxMs)
+                    {
+                        _lootPending = false;
+                        _lootPanelGoneSince = DateTime.MinValue;
+                        LogMessage("AutoChooser: loot pending cancelled (no lootable items appeared).");
+                        return;
+                    }
+
+                    bool panelGoneLongEnough = (now - _lootPanelGoneSince).TotalMilliseconds >= Settings.LootPanelGoneMs.Value;
+
+                    // Throttled scan: any click-ready ground labels right now?
+                    if (panelGoneLongEnough && (now - _lastLootAvailCheck).TotalMilliseconds >= LootAvailCheckIntervalMs)
+                    {
+                        _lastLootAvailCheck = now;
+                        _lootAvailCache = FindBestLootLabel(out _, out _, out _, out _) != null;
+                    }
+
+                    bool lootAvailable = panelGoneLongEnough && _lootAvailCache;
+
+                    if (Settings.Debug.Value && (now - _lastLootPendingLog).TotalMilliseconds >= 2000)
+                    {
+                        _lastLootPendingLog = now;
+                        LogMessage($"AutoChooser: loot pending {(now - _lootPendingStart).TotalSeconds:0}s: panelGone={(panelGoneLongEnough ? "ok" : "waiting")}, lootVisible={lootAvailable}, monstersNearby={MonstersNearby(now)}");
+                    }
+
+                    if (lootAvailable)
+                    {
+                        _lootPending = false;
+                        _lootPhaseActive = true;
+                        _lootPhaseStart = now;
+                        _lastLootClick = DateTime.MinValue;
+                        _lastLootItemSeen = now;
+                        _lootHoverFailures.Clear();
+                        LogMessage("AutoChooser: loot on the ground, panel gone - loot pickup started.");
+                    }
+
+                    return;
+                }
+            }
+
+            if (!panelVisible)
             {
                 if (_panelActive && Settings.LootPickupEnabled.Value)
                 {
-                    _lootPhaseActive = true;
-                    _lootPhaseStart = DateTime.UtcNow;
-                    _lastLootClick = DateTime.MinValue;
-                    LogMessage("AutoChooser: panel closed, starting loot pickup.");
+                    _lootPending = true;
+                    _lootPendingStart = now;
+                    _lootPanelGoneSince = now;
+                    _lootPanelBackSince = DateTime.MinValue;
+                    _lootAvailCache = false;
+                    _lastLootAvailCheck = DateTime.MinValue;
+                    _lootAreaHash = GameController?.Area?.CurrentArea?.Hash ?? 0;
+                    _lootAnchor = GameController?.Player?.GridPosNum;
+                    LogMessage("AutoChooser: panel closed, waiting for the encounter to end before looting.");
                 }
 
                 _panelActive = false;
@@ -136,20 +319,6 @@ namespace AutoChooser
                 _followerWaitStart = DateTime.MinValue;
                 return;
             }
-
-            DateTime now = DateTime.UtcNow;
-
-            bool panelVisible = panel != null && panel.IsVisible;
-
-            // Panel just reappeared after being invisible (between rounds) — reset vote.
-            if (panelVisible && !_panelWasVisible)
-            {
-                _votedThisRound = false;
-                _lastHandle = DateTime.MinValue;
-                _followerWaitStart = DateTime.MinValue;
-            }
-
-            _panelWasVisible = panelVisible;
 
             // Edge-detect the open: the first frame the panel becomes visible we just
             // mark it and wait a short settle delay so the UI is fully interactive.
@@ -754,10 +923,27 @@ namespace AutoChooser
             return bestIdx;
         }
 
-        private const float MonsterProximityDistance = 200f;
+        // Throttled wrapper around HasNearbyHostileMonsters - the entity scan is not
+        // free, so we cache the result for a short interval instead of running it
+        // on every rendered frame.
+        private bool MonstersNearby(DateTime now)
+        {
+            if ((now - _lastMonsterCheck).TotalMilliseconds >= MonsterCheckIntervalMs)
+            {
+                _lastMonsterCheck = now;
+                _monstersNearbyCache = HasNearbyHostileMonsters();
+            }
 
+            return _monstersNearbyCache;
+        }
+
+        // The old 200-unit radius covered most of the arena, so in a live map stray
+        // monsters outside the ultimatum circle kept this true forever and no loot
+        // click ever fired. Now it only looks for hostiles that are actually close
+        // to the player (LootMonsterDistance, default 40 units).
         private bool HasNearbyHostileMonsters()
         {
+            float maxDist = Settings.LootMonsterDistance.Value;
             try
             {
                 var entities = GameController?.EntityListWrapper?.OnlyValidEntities;
@@ -770,7 +956,7 @@ namespace AutoChooser
                     if (!entity.IsAlive || !entity.IsHostile) continue;
 
                     float dist = entity.DistancePlayer;
-                    if (dist > 0f && dist < MonsterProximityDistance)
+                    if (dist > 0f && dist < maxDist)
                         return true;
                 }
             }
@@ -781,83 +967,322 @@ namespace AutoChooser
             return false;
         }
 
-        private void TryPickupLoot()
+        // Debug helper: which hostile is currently blocking loot clicks.
+        private string DescribeNearestHostile()
         {
             try
             {
-                var labels = GameController?.IngameState?.IngameUi?.ItemsOnGroundLabelsVisible;
-                if (labels == null || labels.Count == 0)
-                {
-                    _lootPhaseActive = false;
-                    if (Settings.Debug.Value)
-                    {
-                        LogMessage("AutoChooser: loot pickup ended (no visible labels).");
-                    }
+                var entities = GameController?.EntityListWrapper?.OnlyValidEntities;
+                if (entities == null) return "entity scan unavailable";
 
-                    return;
-                }
-
-                var window = GameController?.Window;
-                if (window == null) return;
-
-                Vector2 windowTopLeft = window.GetWindowRectangleTimeCache.TopLeft;
-                int maxDist = Settings.LootPickupMaxDistance.Value;
-
-                LabelOnGround best = null;
+                string bestName = null;
                 float bestDist = float.MaxValue;
-
-                for (int i = 0; i < labels.Count; i++)
+                foreach (var entity in entities)
                 {
-                    var label = labels[i];
-                    if (label?.ItemOnGround == null || !label.ItemOnGround.IsValid) continue;
+                    if (entity == null || !entity.IsValid) continue;
+                    if (entity.Type != EntityType.Monster) continue;
+                    if (!entity.IsAlive || !entity.IsHostile) continue;
 
-                    float dist = label.ItemOnGround.DistancePlayer;
-                    if (dist > maxDist) continue;
-
-                    if (label?.Label == null || !label.Label.IsValid) continue;
-                    var rect = label.Label.GetClientRect();
-                    if (rect.Width <= 0 || rect.Height <= 0) continue;
-
-                    if (dist < bestDist)
+                    float dist = entity.DistancePlayer;
+                    if (dist > 0f && dist < bestDist)
                     {
                         bestDist = dist;
-                        best = label;
+                        bestName = entity.RenderName;
+                        if (string.IsNullOrWhiteSpace(bestName)) bestName = entity.Path;
                     }
+                }
+
+                return bestName != null
+                    ? $"hostile '{bestName}' at {bestDist:0}u (gate {Settings.LootMonsterDistance.Value}u)"
+                    : "no hostiles found";
+            }
+            catch (Exception ex)
+            {
+                return $"hostile scan failed: {ex.Message}";
+            }
+        }
+
+        // True when the player has moved to a different area since the loot
+        // waiting was armed - loot automation must not follow them there.
+        private bool LootAreaChanged()
+        {
+            try
+            {
+                uint hash = GameController?.Area?.CurrentArea?.Hash ?? 0;
+                return _lootAreaHash != 0 && hash != 0 && hash != _lootAreaHash;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        // True when the player walked too far from the spot where loot waiting
+        // was armed (the ultimatum arena). The arena is tiny, so someone who
+        // walked away is mapping - loot automation must not follow them.
+        private bool LeftLootAnchor()
+        {
+            try
+            {
+                if (_lootAnchor == null) return false;
+                var player = GameController?.Player;
+                if (player == null || !player.IsValid) return false;
+
+                var pos = player.GridPosNum;
+                float dx = pos.X - _lootAnchor.Value.X;
+                float dy = pos.Y - _lootAnchor.Value.Y;
+                float max = Settings.LootMaxWalkDistance.Value;
+                return dx * dx + dy * dy > max * max;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        // The loot phase ended while the panel is still gone (timeout or a quiet
+        // gap between drops): go back to waiting so late/leftover loot still gets
+        // picked. The 5-minute cap and the panel-gone timer restart from here.
+        private void RearmLootPending()
+        {
+            if (!Settings.LootPickupEnabled.Value)
+            {
+                return;
+            }
+
+            _lootPending = true;
+            _lootPendingStart = DateTime.UtcNow;
+            _lootAvailCache = false;
+            _lastLootAvailCheck = DateTime.MinValue;
+        }
+
+        // Scans the visible ground labels and returns the nearest click-ready one:
+        // within max distance, on-screen (not edge-clamped), pickable (party
+        // allocation) and not hover-blacklisted. Null when none. Also reports how
+        // many labels are visible and how many passed the distance/edge filters.
+        private ItemsOnGroundLabelElement.VisibleGroundItemDescription FindBestLootLabel(
+            out RectangleF bestRect, out float bestDist, out int labelCount, out int inRangeCount)
+        {
+            bestRect = default;
+            bestDist = float.MaxValue;
+            labelCount = 0;
+            inRangeCount = 0;
+
+            var groundElement = GameController?.IngameState?.IngameUi?.ItemsOnGroundLabelElement;
+            var labels = groundElement?.VisibleGroundItemLabels;
+            if (labels == null || labels.Count == 0)
+            {
+                return null;
+            }
+
+            labelCount = labels.Count;
+
+            var window = GameController?.Window;
+            if (window == null)
+            {
+                return null;
+            }
+
+            RectangleF windowRect = window.GetWindowRectangleTimeCache;
+
+            // Party-allocation lookup: LabelsOnGroundVisible carries CanPickUp,
+            // VisibleGroundItemLabels does not. Keyed by label element address.
+            var canPickUpByLabel = new Dictionary<long, bool>(labelCount);
+            var allocLabels = groundElement.LabelsOnGroundVisible;
+            if (allocLabels != null)
+            {
+                for (int i = 0; i < allocLabels.Count; i++)
+                {
+                    var l = allocLabels[i];
+                    if (l?.Label != null)
+                    {
+                        canPickUpByLabel[l.Label.Address] = l.CanPickUp;
+                    }
+                }
+            }
+
+            int maxDist = Settings.LootPickupMaxDistance.Value;
+            ItemsOnGroundLabelElement.VisibleGroundItemDescription best = null;
+
+            for (int i = 0; i < labels.Count; i++)
+            {
+                var cand = labels[i];
+                var ent = cand?.Entity;
+                if (ent == null || !ent.IsValid) continue;
+
+                float dist = ent.DistancePlayer;
+                if (dist > maxDist) continue;
+
+                var lbl = cand.Label;
+                if (lbl == null || !lbl.IsValid || !lbl.IsVisible) continue;
+
+                RectangleF rect = cand.ClientRect;
+                if (rect.Width <= 0 || rect.Height <= 0)
+                {
+                    rect = lbl.GetClientRect();
+                    if (rect.Width <= 0 || rect.Height <= 0) continue;
+                }
+
+                // Ignore labels clamped to the screen edge (item is off-screen;
+                // clicking there just walks the character somewhere random).
+                if (!IsLabelClickableArea(rect, windowRect)) continue;
+
+                inRangeCount++;
+
+                // Skip labels we are not allowed to pick up (party allocation).
+                if (canPickUpByLabel.TryGetValue(lbl.Address, out bool pickAllowed) && !pickAllowed) continue;
+
+                // Skip labels the game repeatedly refuses to highlight.
+                if (_lootHoverFailures.TryGetValue(lbl.Address, out int fails) && fails >= LootMaxHoverFailures) continue;
+
+                if (dist < bestDist)
+                {
+                    bestDist = dist;
+                    best = cand;
+                    bestRect = rect;
+                }
+            }
+
+            return best;
+        }
+
+        // Clicks the nearest visible ground item. Returns true only when an actual
+        // click was fired (drives the "nothing left to loot" early stop): labels
+        // that are not pickable or fail hover verification are skipped instead.
+        //
+        // Two things made the old version click "мимо":
+        //  - it read labels via IngameUi.ItemsOnGroundLabelsVisible; the maintained
+        //    source on this ExileCore build (PickItV2 uses it) is
+        //    ItemsOnGroundLabelElement.VisibleGroundItemLabels, which returns
+        //    Entity+Label+ClientRect as one consistent bundle from the game's own
+        //    label layout pass.
+        //  - it clicked blind a few ms after moving the cursor. The game only
+        //    highlights/targets a ground item a frame or two after the cursor
+        //    arrives; a click before that lands on unhighlighted ground and the
+        //    character just walks there. So now we wait for Targetable.isTargeted
+        //    (PickIt-style) and only then click.
+        private bool TryPickupLoot()
+        {
+            try
+            {
+                var best = FindBestLootLabel(out RectangleF bestRect, out float bestDist, out int labelCount, out int inRangeCount);
+
+                if (labelCount == 0)
+                {
+                    if (Settings.Debug.Value)
+                    {
+                        LogMessage("AutoChooser: loot: 0 ground labels visible.");
+                    }
+
+                    return false;
                 }
 
                 if (best == null)
                 {
-                    _lootPhaseActive = false;
                     if (Settings.Debug.Value)
                     {
-                        LogMessage("AutoChooser: loot pickup ended (no items in range).");
+                        LogMessage($"AutoChooser: loot: {labelCount} labels visible, {inRangeCount} in range, none click-ready (allocated/edge/hover-blocked).");
                     }
 
-                    return;
+                    return false;
                 }
 
-                var bestRect = best.Label.GetClientRect();
+                Vector2 windowTopLeft = GameController.Window.GetWindowRectangleTimeCache.TopLeft;
                 Vector2 center = bestRect.Center + windowTopLeft;
 
                 int j = Settings.ClickJitter.Value;
-                int jx = j > 0 ? _rng.Next(-j, j + 1) : 0;
-                int jy = j > 0 ? _rng.Next(-j, j + 1) : 0;
-                int x = (int)Math.Round(center.X) + jx;
-                int y = (int)Math.Round(center.Y) + jy;
+                float jx = j > 0 ? (float)(_rng.NextDouble() * (j * 2) - j) : 0f;
+                float jy = j > 0 ? (float)(_rng.NextDouble() * (j * 2) - j) : 0f;
+                Vector2 clickPos = center + new Vector2(jx, jy);
 
                 if (Settings.Debug.Value)
                 {
-                    LogMessage($"AutoChooser: loot click at ({x},{y}) dist={bestDist:0}");
+                    LogMessage($"AutoChooser: loot hover at ({clickPos.X:0},{clickPos.Y:0}) dist={bestDist:0} rect=({bestRect.X:0},{bestRect.Y:0},{bestRect.Width:0}x{bestRect.Height:0})");
                 }
 
-                MoveMouseSmooth(x, y);
-                if (DateTime.UtcNow < _pauseUntil) return;
-                Thread.Sleep(20 + _rng.Next(0, 40));
+                if (DateTime.UtcNow < _pauseUntil) return false;
+
+                // Move, then WAIT until the game actually highlights the item under
+                // the cursor - clicking before that is a move-here click on empty
+                // ground. NB: the SharpDX Vector2 overload of Input.SetCursorPos is
+                // obsolete on this ExileCore build; the Numerics one is the
+                // maintained path (PickItV2 uses it).
+                Input.SetCursorPos(new System.Numerics.Vector2(clickPos.X, clickPos.Y));
+
+                long lblAddr = best.Label.Address;
+                if (!WaitForLootTarget(best.Entity, best.Label, LootHoverTimeoutMs))
+                {
+                    _lootHoverFailures[lblAddr] = _lootHoverFailures.TryGetValue(lblAddr, out int f) ? f + 1 : 1;
+                    if (Settings.Debug.Value)
+                    {
+                        LogMessage($"AutoChooser: loot hover not confirmed (attempt {_lootHoverFailures[lblAddr]}/{LootMaxHoverFailures}), click skipped.");
+                    }
+
+                    return false;
+                }
+
                 NativeMouse.LeftClick();
+                _lootHoverFailures.Remove(lblAddr);
+                if (Settings.Debug.Value)
+                {
+                    LogMessage($"AutoChooser: loot click at ({clickPos.X:0},{clickPos.Y:0}) dist={bestDist:0} (target confirmed).");
+                }
+
+                Thread.Sleep(10);
+                return true;
             }
             catch (Exception ex)
             {
                 LogMessage($"AutoChooser: loot pickup failed: {ex.Message}");
+                return false;
+            }
+        }
+
+        // Same rule PickIt uses: the label center must lie inside the game window
+        // client area with a margin, so edge-clamped labels (off-screen items)
+        // are not clicked.
+        private static bool IsLabelClickableArea(RectangleF labelRect, RectangleF windowRect)
+        {
+            RectangleF clientWindow = windowRect with { Location = Vector2.Zero };
+            clientWindow.Inflate(-LootEdgeMarginPx, -LootEdgeMarginPx);
+            Vector2 c = labelRect.Center;
+            return clientWindow.Contains(c.X, c.Y);
+        }
+
+        private bool WaitForLootTarget(Entity item, Element label, int timeoutMs)
+        {
+            var sw = Stopwatch.StartNew();
+            do
+            {
+                if (IsLootTargeted(item, label)) return true;
+                Thread.Sleep(LootHoverPollMs);
+                CheckPauseHotkey();
+                if (DateTime.UtcNow < _pauseUntil) return false;
+            }
+            while (sw.ElapsedMilliseconds < timeoutMs);
+
+            return IsLootTargeted(item, label);
+        }
+
+        // The game marks the entity under the cursor as targeted (and highlights
+        // its label) a frame or two after the cursor arrives. This is the exact
+        // signal PickIt waits for before clicking.
+        private static bool IsLootTargeted(Entity item, Element label)
+        {
+            try
+            {
+                if (item == null) return false;
+                var targetable = item.GetComponent<Targetable>();
+                if (targetable != null)
+                {
+                    return targetable.isTargeted;
+                }
+
+                return label != null && label.HasShinyHighlight;
+            }
+            catch
+            {
+                return false;
             }
         }
 
@@ -1096,17 +1521,26 @@ namespace AutoChooser
         [Menu("Random click offset (px) for human feel", 9)]
         public RangeNode<int> ClickJitter { get; set; } = new RangeNode<int>(4, 0, 25);
 
-        [Menu("Loot pickup", 13)]
+        [Menu("Loot pickup after the encounter ends", 13)]
         public ToggleNode LootPickupEnabled { get; set; } = new ToggleNode(true);
 
-        [Menu("Loot pickup timeout (ms) — stops picking after this time", 14)]
-        public RangeNode<int> LootPickupTimeoutMs { get; set; } = new RangeNode<int>(8000, 1000, 30000);
+        [Menu("Panel gone wait before loot (ms) — panel must stay closed this long", 14)]
+        public RangeNode<int> LootPanelGoneMs { get; set; } = new RangeNode<int>(8000, 2000, 120000);
 
-        [Menu("Loot pickup click interval (ms)", 15)]
+        [Menu("Loot pickup timeout (ms) — stops picking after this time", 16)]
+        public RangeNode<int> LootPickupTimeoutMs { get; set; } = new RangeNode<int>(15000, 1000, 60000);
+
+        [Menu("Loot pickup click interval (ms)", 17)]
         public RangeNode<int> LootPickupIntervalMs { get; set; } = new RangeNode<int>(200, 50, 2000);
 
-        [Menu("Loot pickup max distance (px from player)", 16)]
+        [Menu("Loot pickup max distance (units from player)", 18)]
         public RangeNode<int> LootPickupMaxDistance { get; set; } = new RangeNode<int>(300, 50, 800);
+
+        [Menu("Loot monster check distance (units) — no loot clicks while hostiles are closer", 19)]
+        public RangeNode<int> LootMonsterDistance { get; set; } = new RangeNode<int>(40, 10, 400);
+
+        [Menu("Loot max walk distance (units) — stop looting when you walk this far from the ultimatum", 20)]
+        public RangeNode<int> LootMaxWalkDistance { get; set; } = new RangeNode<int>(300, 50, 800);
 
         [Menu("Debug logging", 10)]
         public ToggleNode Debug { get; set; } = new ToggleNode(false);
