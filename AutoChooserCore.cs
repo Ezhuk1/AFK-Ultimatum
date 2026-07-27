@@ -150,6 +150,8 @@ namespace AutoChooser
                 {
                     if (IsUltimatumEncounterActive())
                     {
+                        _panelActive = false;
+                        _votedThisRound = false;
                         _panelWasVisible = false;
                         return;
                     }
