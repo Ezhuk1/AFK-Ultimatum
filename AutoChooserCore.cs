@@ -98,6 +98,7 @@ namespace AutoChooser
                 _votedThisRound = false;
                 _lastHandle = DateTime.MinValue;
                 _followerWaitStart = DateTime.MinValue;
+                return;
             }
 
             // Loot pickup phase: click visible ground labels until timeout.
