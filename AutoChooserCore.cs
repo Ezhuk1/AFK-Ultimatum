@@ -34,6 +34,7 @@ namespace AutoChooser
         private DateTime _lootPhaseStart = DateTime.MinValue;
         private DateTime _lastLootClick = DateTime.MinValue;
         private bool _panelWasVisible;
+        private bool _panelWasVisible;
 
         public override bool Initialise()
         {
@@ -45,29 +46,6 @@ namespace AutoChooser
 
         [DllImport("user32.dll")]
         private static extern short GetAsyncKeyState(int vKey);
-
-        private const string UltimatumChallengePath = "Leagues/Ultimatum/Objects/UltimatumChallengeInteractable";
-
-        private bool IsUltimatumEncounterActive()
-        {
-            try
-            {
-                var entities = GameController?.EntityListWrapper?.OnlyValidEntities;
-                if (entities == null) return false;
-
-                foreach (var entity in entities)
-                {
-                    if (entity?.Path?.Contains(UltimatumChallengePath) == true)
-                        return true;
-                }
-            }
-            catch
-            {
-                // Silently handle — entity list may be invalid mid-frame.
-            }
-
-            return false;
-        }
 
         private bool CheckPauseHotkey()
         {
@@ -110,19 +88,12 @@ namespace AutoChooser
 
             var panel = GameController?.IngameState?.IngameUi?.UltimatumPanel;
 
-            // Loot pickup phase: encounter ended, click visible ground items.
+            // Loot pickup phase: panel is gone, click visible ground items.
             if (_lootPhaseActive)
             {
                 if (panel != null && panel.IsVisible)
                 {
                     _lootPhaseActive = false;
-                    return;
-                }
-
-                if (IsUltimatumEncounterActive())
-                {
-                    _lootPhaseActive = false;
-                    LogMessage("AutoChooser: loot stopped — encounter still active.");
                     return;
                 }
 
@@ -146,23 +117,12 @@ namespace AutoChooser
 
             if (panel == null || !panel.IsVisible)
             {
-                if (_panelActive)
+                if (_panelActive && Settings.LootPickupEnabled.Value)
                 {
-                    if (IsUltimatumEncounterActive())
-                    {
-                        _panelActive = false;
-                        _votedThisRound = false;
-                        _panelWasVisible = false;
-                        return;
-                    }
-
-                    if (Settings.LootPickupEnabled.Value)
-                    {
-                        _lootPhaseActive = true;
-                        _lootPhaseStart = DateTime.UtcNow;
-                        _lastLootClick = DateTime.MinValue;
-                        LogMessage("AutoChooser: encounter ended, starting loot pickup.");
-                    }
+                    _lootPhaseActive = true;
+                    _lootPhaseStart = DateTime.UtcNow;
+                    _lastLootClick = DateTime.MinValue;
+                    LogMessage("AutoChooser: panel closed, starting loot pickup.");
                 }
 
                 _panelActive = false;
