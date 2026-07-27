@@ -30,6 +30,10 @@ namespace AutoChooser
         private readonly Random _rng = new();
         private const int FollowerTimeoutMs = 6000;
 
+        private bool _lootPhaseActive;
+        private DateTime _lootPhaseStart = DateTime.MinValue;
+        private DateTime _lastLootClick = DateTime.MinValue;
+
         public override bool Initialise()
         {
             Name = "AFK Ultimatum";
@@ -65,6 +69,7 @@ namespace AutoChooser
             if (!Settings.Enable.Value)
             {
                 _panelActive = false;
+                _lootPhaseActive = false;
                 _pauseUntil = DateTime.MinValue;
                 _pauseHotkeyWasPressed = false;
                 return;
@@ -80,11 +85,44 @@ namespace AutoChooser
             var panel = GameController?.IngameState?.IngameUi?.UltimatumPanel;
             if (panel == null || !panel.IsVisible)
             {
-                // Panel closed: reset so the next open is treated as a fresh round.
+                // Panel closed: if we were active, enter loot pickup phase.
+                if (_panelActive && Settings.LootPickupEnabled.Value)
+                {
+                    _lootPhaseActive = true;
+                    _lootPhaseStart = DateTime.UtcNow;
+                    _lastLootClick = DateTime.MinValue;
+                    LogMessage("AutoChooser: ultimatum done, starting loot pickup.");
+                }
+
                 _panelActive = false;
                 _votedThisRound = false;
                 _lastHandle = DateTime.MinValue;
                 _followerWaitStart = DateTime.MinValue;
+            }
+
+            // Loot pickup phase: click visible ground labels until timeout.
+            if (_lootPhaseActive)
+            {
+                if (DateTime.UtcNow < _pauseUntil)
+                {
+                    return;
+                }
+
+                DateTime now = DateTime.UtcNow;
+
+                if ((now - _lootPhaseStart).TotalMilliseconds >= Settings.LootPickupTimeoutMs.Value)
+                {
+                    _lootPhaseActive = false;
+                    LogMessage("AutoChooser: loot pickup phase ended (timeout).");
+                    return;
+                }
+
+                if ((now - _lastLootClick).TotalMilliseconds >= Settings.LootPickupIntervalMs.Value)
+                {
+                    _lastLootClick = now;
+                    TryPickupLoot();
+                }
+
                 return;
             }
 
@@ -96,6 +134,7 @@ namespace AutoChooser
             {
                 _panelActive = true;
                 _panelOpenTime = now;
+                _lootPhaseActive = false;
                 return;
             }
 
@@ -693,6 +732,85 @@ namespace AutoChooser
             return bestIdx;
         }
 
+        private void TryPickupLoot()
+        {
+            try
+            {
+                var labels = GameController?.IngameState?.IngameUi?.ItemsOnGroundLabelsVisible;
+                if (labels == null || labels.Count == 0)
+                {
+                    _lootPhaseActive = false;
+                    if (Settings.Debug.Value)
+                    {
+                        LogMessage("AutoChooser: loot pickup ended (no visible labels).");
+                    }
+
+                    return;
+                }
+
+                var window = GameController?.Window;
+                if (window == null) return;
+
+                Vector2 windowTopLeft = window.GetWindowRectangleTimeCache.TopLeft;
+                int maxDist = Settings.LootPickupMaxDistance.Value;
+
+                LabelOnGround best = null;
+                float bestDist = float.MaxValue;
+
+                for (int i = 0; i < labels.Count; i++)
+                {
+                    var label = labels[i];
+                    if (label?.ItemOnGround == null || !label.ItemOnGround.IsValid) continue;
+
+                    float dist = label.ItemOnGround.DistancePlayer;
+                    if (dist > maxDist) continue;
+
+                    var rect = label.GetClientRect();
+                    if (rect.Width <= 0 || rect.Height <= 0) continue;
+
+                    if (dist < bestDist)
+                    {
+                        bestDist = dist;
+                        best = label;
+                    }
+                }
+
+                if (best == null)
+                {
+                    _lootPhaseActive = false;
+                    if (Settings.Debug.Value)
+                    {
+                        LogMessage("AutoChooser: loot pickup ended (no items in range).");
+                    }
+
+                    return;
+                }
+
+                var bestRect = best.GetClientRect();
+                Vector2 center = bestRect.Center + windowTopLeft;
+
+                int j = Settings.ClickJitter.Value;
+                int jx = j > 0 ? _rng.Next(-j, j + 1) : 0;
+                int jy = j > 0 ? _rng.Next(-j, j + 1) : 0;
+                int x = (int)Math.Round(center.X) + jx;
+                int y = (int)Math.Round(center.Y) + jy;
+
+                if (Settings.Debug.Value)
+                {
+                    LogMessage($"AutoChooser: loot click at ({x},{y}) dist={bestDist:0}");
+                }
+
+                MoveMouseSmooth(x, y);
+                if (DateTime.UtcNow < _pauseUntil) return;
+                Thread.Sleep(20 + _rng.Next(0, 40));
+                NativeMouse.LeftClick();
+            }
+            catch (Exception ex)
+            {
+                LogMessage($"AutoChooser: loot pickup failed: {ex.Message}");
+            }
+        }
+
         private void ClickElement(Element el, string label)
         {
             RectangleF rect = el.GetClientRect();
@@ -927,6 +1045,18 @@ namespace AutoChooser
 
         [Menu("Random click offset (px) for human feel", 9)]
         public RangeNode<int> ClickJitter { get; set; } = new RangeNode<int>(4, 0, 25);
+
+        [Menu("Loot pickup", 13)]
+        public ToggleNode LootPickupEnabled { get; set; } = new ToggleNode(true);
+
+        [Menu("Loot pickup timeout (ms) — stops picking after this time", 14)]
+        public RangeNode<int> LootPickupTimeoutMs { get; set; } = new RangeNode<int>(8000, 1000, 30000);
+
+        [Menu("Loot pickup click interval (ms)", 15)]
+        public RangeNode<int> LootPickupIntervalMs { get; set; } = new RangeNode<int>(200, 50, 2000);
+
+        [Menu("Loot pickup max distance (px from player)", 16)]
+        public RangeNode<int> LootPickupMaxDistance { get; set; } = new RangeNode<int>(300, 50, 800);
 
         [Menu("Debug logging", 10)]
         public ToggleNode Debug { get; set; } = new ToggleNode(false);
