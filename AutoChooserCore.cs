@@ -33,6 +33,7 @@ namespace AutoChooser
         private bool _lootPhaseActive;
         private DateTime _lootPhaseStart = DateTime.MinValue;
         private DateTime _lastLootClick = DateTime.MinValue;
+        private bool _panelWasVisible;
 
         public override bool Initialise()
         {
@@ -94,6 +95,7 @@ namespace AutoChooser
             {
                 _panelActive = false;
                 _lootPhaseActive = false;
+                _panelWasVisible = false;
                 _pauseUntil = DateTime.MinValue;
                 _pauseHotkeyWasPressed = false;
                 return;
@@ -168,6 +170,18 @@ namespace AutoChooser
             }
 
             DateTime now = DateTime.UtcNow;
+
+            bool panelVisible = panel != null && panel.IsVisible;
+
+            // Panel just reappeared after being invisible (between rounds) — reset vote.
+            if (panelVisible && !_panelWasVisible)
+            {
+                _votedThisRound = false;
+                _lastHandle = DateTime.MinValue;
+                _followerWaitStart = DateTime.MinValue;
+            }
+
+            _panelWasVisible = panelVisible;
 
             // Edge-detect the open: the first frame the panel becomes visible we just
             // mark it and wait a short settle delay so the UI is fully interactive.
