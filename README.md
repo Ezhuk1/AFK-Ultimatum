@@ -1,6 +1,6 @@
 # AFK Ultimatum
 
-**Version: v3**
+**Version: v4**
 
 An [ExileApi](https://github.com/exApiTools/ExileApi-Compiled) plugin (PoE 3.28 HUD) that automatically picks one of the three **Ultimatum** reward cards by priority and presses the confirm button — using smooth, human-like mouse movement.
 
@@ -57,10 +57,14 @@ Open the plugin settings window inside ExileApi. The following options are avail
 | **Min mouse move duration (ms)** | Base travel time; far moves take longer than this. | `140` |
 | **Random click offset (px)** | Small random offset on the click point for a human feel. | `4` |
 | **Debug logging** | Logs click coordinates and selection state to the ExileApi log. | `false` |
+| **Loot pickup** | After ultimatum completes, click visible ground items (uses your in-game loot filter). | `true` |
+| **Loot pickup timeout (ms)** | Max time for loot phase. | `8000` |
+| **Loot pickup interval (ms)** | Delay between loot clicks. | `200` |
+| **Loot pickup max distance** | Max distance from player to pick up items (px). | `300` |
 
 ### Priority sliders
 
-Below the options above is a list of **all 45 Ultimatum modifiers**, each with a
+Below the options above is a list of **all 69 Ultimatum modifiers** (including tiered II/III/IV variants), each with a
 `Priority (1–100)` slider:
 
 - **1** — highest priority, always take this card first.
@@ -126,6 +130,11 @@ its own entry, not the base `"Blistering Cold"`.
 ---
 
 ## Changelog
+
+### v4
+- **Loot pickup.** After the Ultimatum panel closes, the bot automatically clicks
+  visible ground items (respecting your in-game loot filter) until timeout or no
+  items remain. Configurable timeout, interval, and max distance.
 
 ### v3.1
 - Auto-clicks confirm on modifier-less panels ("Begin" / "Next wave" screens).
