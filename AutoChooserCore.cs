@@ -108,18 +108,18 @@ namespace AutoChooser
                     return;
                 }
 
-                DateTime now = DateTime.UtcNow;
+                DateTime lootNow = DateTime.UtcNow;
 
-                if ((now - _lootPhaseStart).TotalMilliseconds >= Settings.LootPickupTimeoutMs.Value)
+                if ((lootNow - _lootPhaseStart).TotalMilliseconds >= Settings.LootPickupTimeoutMs.Value)
                 {
                     _lootPhaseActive = false;
                     LogMessage("AutoChooser: loot pickup phase ended (timeout).");
                     return;
                 }
 
-                if ((now - _lastLootClick).TotalMilliseconds >= Settings.LootPickupIntervalMs.Value)
+                if ((lootNow - _lastLootClick).TotalMilliseconds >= Settings.LootPickupIntervalMs.Value)
                 {
-                    _lastLootClick = now;
+                    _lastLootClick = lootNow;
                     TryPickupLoot();
                 }
 
@@ -765,7 +765,8 @@ namespace AutoChooser
                     float dist = label.ItemOnGround.DistancePlayer;
                     if (dist > maxDist) continue;
 
-                    var rect = label.GetClientRect();
+                    if (label?.Label == null || !label.Label.IsValid) continue;
+                    var rect = label.Label.GetClientRect();
                     if (rect.Width <= 0 || rect.Height <= 0) continue;
 
                     if (dist < bestDist)
@@ -786,7 +787,7 @@ namespace AutoChooser
                     return;
                 }
 
-                var bestRect = best.GetClientRect();
+                var bestRect = best.Label.GetClientRect();
                 Vector2 center = bestRect.Center + windowTopLeft;
 
                 int j = Settings.ClickJitter.Value;
