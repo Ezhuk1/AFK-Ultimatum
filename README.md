@@ -1,6 +1,6 @@
 # AFK Ultimatum
 
-**Version: v9**
+**Version: v11**
 
 An [ExileApi](https://github.com/exApiTools/ExileApi-Compiled) plugin (PoE 3.28 HUD) that automatically picks one of the three **Ultimatum** reward cards by priority and presses the confirm button — using smooth, human-like mouse movement.
 
@@ -19,7 +19,8 @@ When you enter an Ultimatum encounter, a panel appears with **three option cards
 - **Human-like cursor** — the mouse glides to the target with eased motion, a slight curved path, randomized travel time (scaled by distance) and a small click jitter, instead of teleporting.
 - **Reliable selection** — verifies the card was actually selected and retries once if the game did not register the click.
 - **No stray clicks after accept** — once the round is confirmed, the plugin will not act again on the same panel.
-- **Autoloot on encounter end** — detects that the encounter really ended (panel gone + no monsters nearby) and picks up the dropped rewards, respecting your in-game loot filter and party allocation.
+- **Autoloot on encounter end** — detects that the encounter really ended and picks up the dropped rewards, respecting your in-game loot filter and party allocation. Gold is skipped (it auto-collects on walk-over anyway).
+- **Quiet by default** — the plugin writes nothing to the log unless **Debug logging** is enabled.
 
 ---
 
@@ -59,12 +60,10 @@ Open the plugin settings window inside ExileApi. The following options are avail
 | **Random click offset (px)** | Small random offset on the click point for a human feel. | `4` |
 | **Debug logging** | Logs click coordinates and selection state to the ExileApi log. | `false` |
 | **Loot pickup** | After the ultimatum encounter ends, click visible ground items (uses your in-game loot filter). | `true` |
-| **Panel gone wait before loot (ms)** | The Ultimatum panel must stay closed this long before looting starts (filters out inter-wave closes). | `8000` |
-| **Loot pickup timeout (ms)** | Max time for loot phase. | `15000` |
-| **Loot pickup interval (ms)** | Delay between loot clicks. | `200` |
-| **Loot pickup max distance** | Max distance from player to pick up items (game units). | `300` |
-| **Loot monster check distance** | No loot clicks while hostile monsters are closer than this (game units). Keep it small — stray map monsters outside the arena must not block looting. | `40` |
-| **Loot max walk distance** | Looting stops if you walk farther than this from the ultimatum spot (game units) — the bot never chases loot across the map. | `300` |
+
+Loot tuning is intentionally kept out of the settings UI. Built-in defaults:
+panel-gone wait 8 s, loot phase timeout 15 s, click interval 200 ms, pickup
+range 100 units, monster click-gate 40 units, walk-away cancel 150 units.
 
 ### Priority sliders
 
@@ -107,16 +106,16 @@ remaining ones the plugin picks the one with the **smallest** priority value.
    (Monsters are intentionally NOT part of this trigger: in a live map stray
    monsters wander near the arena forever and the loot phase would never start.
    They only gate the clicks themselves.) The loot phase clicks the nearest
-   visible, pickable ground label (respecting party allocation) every `interval`
-   ms, pauses clicking while hostile monsters are within `Loot monster check
-   distance` (default 40 units — close-range threats only, so map monsters
-   outside the arena can't stall looting forever), and stops ~2.5 s after the
-   last successful click (monster pauses don't count as quiet time), on timeout,
-   or if the panel reappears
+   visible, pickable ground label (respecting party allocation, skipping gold —
+   it auto-collects on walk-over) every `interval` ms, pauses clicking while
+   hostile monsters are within 40 units (close-range threats only, so map
+   monsters outside the arena can't stall looting forever), and stops ~2.5 s
+   after the last successful click (monster pauses don't count as quiet time),
+   on timeout, or if the panel reappears
    (a brief panel flash is debounced and does not cancel looting). When a phase
    ends while the panel is still gone, the plugin goes back to waiting so late
    drops still get picked; everything is cancelled on area change or when you
-   walk farther than `Loot max walk distance` from the ultimatum spot. Each click is
+   walk farther than 150 units from the ultimatum spot. Each click is
    fired only after the game confirms the item under the cursor is targeted
    (label highlighted), so it can't degrade into random walk-here clicks.
 
@@ -152,6 +151,25 @@ its own entry, not the base `"Blistering Cold"`.
 ---
 
 ## Changelog
+
+### v11
+- **Loot tuning fully removed from the settings UI.** ExileCore renders public
+  node properties even without a `[Menu]` attribute, so the v10 approach (dropping
+  the attribute) still showed the sliders. The six loot values (panel-gone 8 s,
+  timeout 15 s, interval 200 ms, pickup range 100, monster gate 40, walk-away
+  cancel 150) are now plain code constants — the settings window has only the
+  **Loot pickup** checkbox.
+
+### v10
+- **Gold is no longer clicked.** Gold piles (`Items/Gold/`,
+  `Items/Currency/GoldCoin`, or labels reading `123 GOLD`) are skipped — gold
+  auto-collects when you walk over it.
+- **Quiet by default.** Every log message (including phase transitions and
+  click traces) is now written only when **Debug logging** is enabled.
+- **Settings UI cleanup.** The loot sliders were removed from the menu; only
+  the **Loot pickup** checkbox remains. Defaults are now fixed in code:
+  pickup range 100, walk-away cancel 150, monster gate 40, panel-gone wait 8 s,
+  timeout 15 s, click interval 200 ms.
 
 ### v9
 - **Fixed the bot getting stuck on the card screen.** Since v7 the per-round

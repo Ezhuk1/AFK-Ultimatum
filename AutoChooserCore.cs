@@ -61,10 +61,27 @@ namespace AutoChooser
         private const int LootMaxHoverFailures = 3;
         private const float LootEdgeMarginPx = 36f;
 
+        // Loot tuning: fixed in code on purpose, not user-configurable.
+        private const int LootPanelGoneMs = 8000;
+        private const int LootPickupTimeoutMs = 15000;
+        private const int LootPickupIntervalMs = 200;
+        private const int LootPickupMaxDistance = 100;
+        private const int LootMonsterDistance = 40;
+        private const int LootMaxWalkDistance = 150;
+
         public override bool Initialise()
         {
             Name = "AFK Ultimatum";
             return true;
+        }
+
+        // All plugin output is gated behind the Debug logging setting.
+        private void Log(string message)
+        {
+            if (Settings.Debug.Value)
+            {
+                LogMessage(message);
+            }
         }
 
         private bool _pauseHotkeyWasPressed;
@@ -89,7 +106,7 @@ namespace AutoChooser
                 _lastHandle = DateTime.MinValue;
                 _followerWaitStart = DateTime.MinValue;
                 _pauseHotkeyWasPressed = true;
-                LogMessage($"AutoChooser: paused for {Settings.PauseDurationMs.Value} ms.");
+                Log($"AutoChooser: paused for {Settings.PauseDurationMs.Value} ms.");
                 return true;
             }
             _pauseHotkeyWasPressed = hotkeyDown;
@@ -136,7 +153,7 @@ namespace AutoChooser
                 {
                     _lootPhaseActive = false;
                     _lootPending = false;
-                    LogMessage("AutoChooser: area changed, loot pickup cancelled.");
+                    Log("AutoChooser: area changed, loot pickup cancelled.");
                     return;
                 }
 
@@ -145,7 +162,7 @@ namespace AutoChooser
                     _lootPhaseActive = false;
                     _lootPending = false;
                     _lootAnchor = null;
-                    LogMessage("AutoChooser: walked away from the ultimatum, loot pickup cancelled.");
+                    Log("AutoChooser: walked away from the ultimatum, loot pickup cancelled.");
                     return;
                 }
 
@@ -160,10 +177,10 @@ namespace AutoChooser
                     }
                 }
 
-                if ((now - _lootPhaseStart).TotalMilliseconds >= Settings.LootPickupTimeoutMs.Value)
+                if ((now - _lootPhaseStart).TotalMilliseconds >= LootPickupTimeoutMs)
                 {
                     _lootPhaseActive = false;
-                    LogMessage("AutoChooser: loot pickup ended (timeout).");
+                    Log("AutoChooser: loot pickup ended (timeout).");
                     RearmLootPending();
                     return;
                 }
@@ -172,12 +189,12 @@ namespace AutoChooser
                 if ((now - _lastLootItemSeen).TotalMilliseconds >= LootNoItemsGraceMs)
                 {
                     _lootPhaseActive = false;
-                    LogMessage("AutoChooser: loot pickup ended (no more items).");
+                    Log("AutoChooser: loot pickup ended (no more items).");
                     RearmLootPending();
                     return;
                 }
 
-                if ((now - _lastLootClick).TotalMilliseconds >= Settings.LootPickupIntervalMs.Value)
+                if ((now - _lastLootClick).TotalMilliseconds >= LootPickupIntervalMs)
                 {
                     _lastLootClick = now;
                     if (MonstersNearby(now))
@@ -189,7 +206,7 @@ namespace AutoChooser
                         if (Settings.Debug.Value && (now - _lastLootBlockLog).TotalMilliseconds >= 2000)
                         {
                             _lastLootBlockLog = now;
-                            LogMessage($"AutoChooser: loot clicks paused - {DescribeNearestHostile()}.");
+                            Log($"AutoChooser: loot clicks paused - {DescribeNearestHostile()}.");
                         }
                     }
                     else if (TryPickupLoot())
@@ -226,7 +243,7 @@ namespace AutoChooser
                         _lootPending = false;
                         _lootPanelBackSince = DateTime.MinValue;
                         _lootPanelGoneSince = DateTime.MinValue;
-                        LogMessage("AutoChooser: panel reappeared - it was an inter-wave close, loot pending cancelled.");
+                        Log("AutoChooser: panel reappeared - it was an inter-wave close, loot pending cancelled.");
                     }
                     // fall through to panel handling below
                 }
@@ -246,7 +263,7 @@ namespace AutoChooser
                     if (LootAreaChanged())
                     {
                         _lootPending = false;
-                        LogMessage("AutoChooser: area changed, loot pending cancelled.");
+                        Log("AutoChooser: area changed, loot pending cancelled.");
                         return;
                     }
 
@@ -254,7 +271,7 @@ namespace AutoChooser
                     {
                         _lootPending = false;
                         _lootAnchor = null;
-                        LogMessage("AutoChooser: walked away from the ultimatum, loot pending cancelled.");
+                        Log("AutoChooser: walked away from the ultimatum, loot pending cancelled.");
                         return;
                     }
 
@@ -262,11 +279,11 @@ namespace AutoChooser
                     {
                         _lootPending = false;
                         _lootPanelGoneSince = DateTime.MinValue;
-                        LogMessage("AutoChooser: loot pending cancelled (no lootable items appeared).");
+                        Log("AutoChooser: loot pending cancelled (no lootable items appeared).");
                         return;
                     }
 
-                    bool panelGoneLongEnough = (now - _lootPanelGoneSince).TotalMilliseconds >= Settings.LootPanelGoneMs.Value;
+                    bool panelGoneLongEnough = (now - _lootPanelGoneSince).TotalMilliseconds >= LootPanelGoneMs;
 
                     // Throttled scan: any click-ready ground labels right now?
                     if (panelGoneLongEnough && (now - _lastLootAvailCheck).TotalMilliseconds >= LootAvailCheckIntervalMs)
@@ -280,7 +297,7 @@ namespace AutoChooser
                     if (Settings.Debug.Value && (now - _lastLootPendingLog).TotalMilliseconds >= 2000)
                     {
                         _lastLootPendingLog = now;
-                        LogMessage($"AutoChooser: loot pending {(now - _lootPendingStart).TotalSeconds:0}s: panelGone={(panelGoneLongEnough ? "ok" : "waiting")}, lootVisible={lootAvailable}, monstersNearby={MonstersNearby(now)}");
+                        Log($"AutoChooser: loot pending {(now - _lootPendingStart).TotalSeconds:0}s: panelGone={(panelGoneLongEnough ? "ok" : "waiting")}, lootVisible={lootAvailable}, monstersNearby={MonstersNearby(now)}");
                     }
 
                     if (lootAvailable)
@@ -291,7 +308,7 @@ namespace AutoChooser
                         _lastLootClick = DateTime.MinValue;
                         _lastLootItemSeen = now;
                         _lootHoverFailures.Clear();
-                        LogMessage("AutoChooser: loot on the ground, panel gone - loot pickup started.");
+                        Log("AutoChooser: loot on the ground, panel gone - loot pickup started.");
                     }
 
                     return;
@@ -310,7 +327,7 @@ namespace AutoChooser
                     _lastLootAvailCheck = DateTime.MinValue;
                     _lootAreaHash = GameController?.Area?.CurrentArea?.Hash ?? 0;
                     _lootAnchor = GameController?.Player?.GridPosNum;
-                    LogMessage("AutoChooser: panel closed, waiting for the encounter to end before looting.");
+                    Log("AutoChooser: panel closed, waiting for the encounter to end before looting.");
                 }
 
                 _panelActive = false;
@@ -358,7 +375,7 @@ namespace AutoChooser
                 }
                 catch (Exception ex)
                 {
-                    LogMessage($"AutoChooser: handle failed: {ex.Message}");
+                    Log($"AutoChooser: handle failed: {ex.Message}");
                 }
             }
         }
@@ -386,7 +403,7 @@ namespace AutoChooser
                 if (panel.ConfirmButton is Element confirm2 && confirm2.IsValid && confirm2.IsVisible)
                 {
                     ClickElement(confirm2, "confirm/begin");
-                    LogMessage("AutoChooser: no choices visible, pressed confirm/begin.");
+                    Log("AutoChooser: no choices visible, pressed confirm/begin.");
                 }
 
                 return;
@@ -404,10 +421,7 @@ namespace AutoChooser
             {
                 if (!IsInParty())
                 {
-                    if (Settings.Debug.Value)
-                    {
-                        LogMessage("AutoChooser: not in a party, voting by own priority.");
-                    }
+                    Log("AutoChooser: not in a party, voting by own priority.");
 
                     (pickIndex, pick, pickPriority) = PickByPriority(choices, modifierNames);
                 }
@@ -420,10 +434,7 @@ namespace AutoChooser
                         pick = choices[leadIdx];
                         pickPriority = -1;
                         int count = GetVoteCount(choices[leadIdx]);
-                        if (Settings.Debug.Value)
-                        {
-                            LogMessage($"AutoChooser: following leading vote -> option[{pickIndex}] (count {count}).");
-                        }
+                        Log($"AutoChooser: following leading vote -> option[{pickIndex}] (count {count}).");
                     }
                     else
                     {
@@ -434,19 +445,13 @@ namespace AutoChooser
 
                         if ((DateTime.UtcNow - _followerWaitStart).TotalMilliseconds >= FollowerTimeoutMs)
                         {
-                            if (Settings.Debug.Value)
-                            {
-                                LogMessage("AutoChooser: no votes detected in time, falling back to own priority.");
-                            }
+                            Log("AutoChooser: no votes detected in time, falling back to own priority.");
 
                             (pickIndex, pick, pickPriority) = PickByPriority(choices, modifierNames);
                         }
                         else
                         {
-                            if (Settings.Debug.Value)
-                            {
-                                LogMessage($"AutoChooser: follower waiting for party votes ({(int)(DateTime.UtcNow - _followerWaitStart).TotalMilliseconds} ms).");
-                            }
+                            Log($"AutoChooser: follower waiting for party votes ({(int)(DateTime.UtcNow - _followerWaitStart).TotalMilliseconds} ms).");
 
                             return;
                         }
@@ -456,7 +461,7 @@ namespace AutoChooser
 
             if (pick == null)
             {
-                LogMessage("AutoChooser: no selectable option (all set to never, or none visible); not clicking.");
+                Log("AutoChooser: no selectable option (all set to never, or none visible); not clicking.");
                 _followerWaitStart = DateTime.MinValue;
                 return;
             }
@@ -473,10 +478,7 @@ namespace AutoChooser
                 if (DateTime.UtcNow < _pauseUntil) { _votedThisRound = false; return; }
                 if (selValid && panel.SelectedChoice != pickIndex)
                 {
-                    if (Settings.Debug.Value)
-                    {
-                        LogMessage($"AutoChooser: option not selected yet (SelectedChoice={panel.SelectedChoice}, want {pickIndex}), retry");
-                    }
+                    Log($"AutoChooser: option not selected yet (SelectedChoice={panel.SelectedChoice}, want {pickIndex}), retry");
 
                     Thread.Sleep(90);
                     CheckPauseHotkey();
@@ -496,7 +498,7 @@ namespace AutoChooser
                 string pickedName = pickIndex < modifierNames.Count && !string.IsNullOrWhiteSpace(modifierNames[pickIndex])
                     ? modifierNames[pickIndex]
                     : GetElementModifierText(pick);
-                LogMessage($"AutoChooser: selected option[{pickIndex}] '{pickedName}' (priority {pickPriority}).");
+                Log($"AutoChooser: selected option[{pickIndex}] '{pickedName}' (priority {pickPriority}).");
                 _votedThisRound = true;
                 Thread.Sleep(Settings.ClickDelayMs.Value);
             }
@@ -507,11 +509,11 @@ namespace AutoChooser
             if (panel.ConfirmButton is Element confirm && confirm.IsValid && confirm.IsVisible)
             {
                 ClickElement(confirm, "confirm/start");
-                LogMessage("AutoChooser: pressed start/confirm.");
+                Log("AutoChooser: pressed start/confirm.");
             }
-            else if (Settings.Debug.Value)
+            else
             {
-                LogMessage("AutoChooser: confirm/start button not found or not visible.");
+                Log("AutoChooser: confirm/start button not found or not visible.");
             }
         }
 
@@ -553,10 +555,7 @@ namespace AutoChooser
 
                 int priority = GetPriority(name);
 
-                if (Settings.Debug.Value)
-                {
-                    LogMessage($"AutoChooser: option[{i}] '{name}' priority={priority}");
-                }
+                Log($"AutoChooser: option[{i}] '{name}' priority={priority}");
 
                 if (priority < anyPriority)
                 {
@@ -794,10 +793,7 @@ namespace AutoChooser
                     string statusName = Enum.GetName(status.GetType(), status);
                     if (!string.IsNullOrEmpty(statusName) && statusName != "None")
                     {
-                        if (Settings.Debug.Value)
-                        {
-                            LogMessage($"AutoChooser: in party detected (status {statusName}).");
-                        }
+                        Log($"AutoChooser: in party detected (status {statusName}).");
 
                         return true;
                     }
@@ -820,7 +816,7 @@ namespace AutoChooser
             }
             catch (Exception ex)
             {
-                LogMessage($"AutoChooser: party check failed: {ex.Message}");
+                Log($"AutoChooser: party check failed: {ex.Message}");
             }
 
             return false;
@@ -943,7 +939,7 @@ namespace AutoChooser
         // to the player (LootMonsterDistance, default 40 units).
         private bool HasNearbyHostileMonsters()
         {
-            float maxDist = Settings.LootMonsterDistance.Value;
+            float maxDist = LootMonsterDistance;
             try
             {
                 var entities = GameController?.EntityListWrapper?.OnlyValidEntities;
@@ -993,7 +989,7 @@ namespace AutoChooser
                 }
 
                 return bestName != null
-                    ? $"hostile '{bestName}' at {bestDist:0}u (gate {Settings.LootMonsterDistance.Value}u)"
+                    ? $"hostile '{bestName}' at {bestDist:0}u (gate {LootMonsterDistance}u)"
                     : "no hostiles found";
             }
             catch (Exception ex)
@@ -1031,7 +1027,7 @@ namespace AutoChooser
                 var pos = player.GridPosNum;
                 float dx = pos.X - _lootAnchor.Value.X;
                 float dy = pos.Y - _lootAnchor.Value.Y;
-                float max = Settings.LootMaxWalkDistance.Value;
+                float max = LootMaxWalkDistance;
                 return dx * dx + dy * dy > max * max;
             }
             catch
@@ -1101,7 +1097,7 @@ namespace AutoChooser
                 }
             }
 
-            int maxDist = Settings.LootPickupMaxDistance.Value;
+            int maxDist = LootPickupMaxDistance;
             ItemsOnGroundLabelElement.VisibleGroundItemDescription best = null;
 
             for (int i = 0; i < labels.Count; i++)
@@ -1110,11 +1106,23 @@ namespace AutoChooser
                 var ent = cand?.Entity;
                 if (ent == null || !ent.IsValid) continue;
 
+                // Gold collects itself when you walk over it - never click it.
+                string entPath = ent.Path ?? string.Empty;
+                if (entPath.IndexOf("Items/Gold/", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    entPath.IndexOf("Items/Currency/GoldCoin", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    continue;
+                }
+
                 float dist = ent.DistancePlayer;
                 if (dist > maxDist) continue;
 
                 var lbl = cand.Label;
                 if (lbl == null || !lbl.IsValid || !lbl.IsVisible) continue;
+
+                // Fallback gold check by the visible text ("205 GOLD") for when
+                // the entity path is unavailable.
+                if (IsGoldText(lbl.GetText(64))) continue;
 
                 RectangleF rect = cand.ClientRect;
                 if (rect.Width <= 0 || rect.Height <= 0)
@@ -1169,20 +1177,14 @@ namespace AutoChooser
 
                 if (labelCount == 0)
                 {
-                    if (Settings.Debug.Value)
-                    {
-                        LogMessage("AutoChooser: loot: 0 ground labels visible.");
-                    }
+                    Log("AutoChooser: loot: 0 ground labels visible.");
 
                     return false;
                 }
 
                 if (best == null)
                 {
-                    if (Settings.Debug.Value)
-                    {
-                        LogMessage($"AutoChooser: loot: {labelCount} labels visible, {inRangeCount} in range, none click-ready (allocated/edge/hover-blocked).");
-                    }
+                    Log($"AutoChooser: loot: {labelCount} labels visible, {inRangeCount} in range, none click-ready (allocated/edge/hover-blocked).");
 
                     return false;
                 }
@@ -1195,10 +1197,7 @@ namespace AutoChooser
                 float jy = j > 0 ? (float)(_rng.NextDouble() * (j * 2) - j) : 0f;
                 Vector2 clickPos = center + new Vector2(jx, jy);
 
-                if (Settings.Debug.Value)
-                {
-                    LogMessage($"AutoChooser: loot hover at ({clickPos.X:0},{clickPos.Y:0}) dist={bestDist:0} rect=({bestRect.X:0},{bestRect.Y:0},{bestRect.Width:0}x{bestRect.Height:0})");
-                }
+                Log($"AutoChooser: loot hover at ({clickPos.X:0},{clickPos.Y:0}) dist={bestDist:0} rect=({bestRect.X:0},{bestRect.Y:0},{bestRect.Width:0}x{bestRect.Height:0})");
 
                 if (DateTime.UtcNow < _pauseUntil) return false;
 
@@ -1213,29 +1212,34 @@ namespace AutoChooser
                 if (!WaitForLootTarget(best.Entity, best.Label, LootHoverTimeoutMs))
                 {
                     _lootHoverFailures[lblAddr] = _lootHoverFailures.TryGetValue(lblAddr, out int f) ? f + 1 : 1;
-                    if (Settings.Debug.Value)
-                    {
-                        LogMessage($"AutoChooser: loot hover not confirmed (attempt {_lootHoverFailures[lblAddr]}/{LootMaxHoverFailures}), click skipped.");
-                    }
+                    Log($"AutoChooser: loot hover not confirmed (attempt {_lootHoverFailures[lblAddr]}/{LootMaxHoverFailures}), click skipped.");
 
                     return false;
                 }
 
                 NativeMouse.LeftClick();
                 _lootHoverFailures.Remove(lblAddr);
-                if (Settings.Debug.Value)
-                {
-                    LogMessage($"AutoChooser: loot click at ({clickPos.X:0},{clickPos.Y:0}) dist={bestDist:0} (target confirmed).");
-                }
+                Log($"AutoChooser: loot click at ({clickPos.X:0},{clickPos.Y:0}) dist={bestDist:0} (target confirmed).");
 
                 Thread.Sleep(10);
                 return true;
             }
             catch (Exception ex)
             {
-                LogMessage($"AutoChooser: loot pickup failed: {ex.Message}");
+                Log($"AutoChooser: loot pickup failed: {ex.Message}");
                 return false;
             }
+        }
+
+        // "205 GOLD", "22 gold" - the visible text of gold piles.
+        private static bool IsGoldText(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return false;
+            text = text.Trim();
+            if (!text.EndsWith("GOLD", StringComparison.OrdinalIgnoreCase)) return false;
+
+            string digits = text.Substring(0, text.Length - 4).Replace(" ", string.Empty);
+            return digits.Length > 0 && digits.All(char.IsDigit);
         }
 
         // Same rule PickIt uses: the label center must lie inside the game window
@@ -1310,10 +1314,7 @@ namespace AutoChooser
             int x = (int)Math.Round(center.X) + jx;
             int y = (int)Math.Round(center.Y) + jy;
 
-            if (Settings.Debug.Value)
-            {
-                LogMessage($"AutoChooser: click {label} at screen ({x},{y}) (winTopLeft {topLeft.X:0},{topLeft.Y:0}, center {center.X:0},{center.Y:0})");
-            }
+            Log($"AutoChooser: click {label} at screen ({x},{y}) (winTopLeft {topLeft.X:0},{topLeft.Y:0}, center {center.X:0},{center.Y:0})");
 
             try
             {
@@ -1324,7 +1325,7 @@ namespace AutoChooser
             }
             catch (Exception ex)
             {
-                LogMessage($"AutoChooser: click failed: {ex.Message}");
+                Log($"AutoChooser: click failed: {ex.Message}");
             }
         }
 
@@ -1523,24 +1524,6 @@ namespace AutoChooser
 
         [Menu("Loot pickup after the encounter ends", 13)]
         public ToggleNode LootPickupEnabled { get; set; } = new ToggleNode(true);
-
-        [Menu("Panel gone wait before loot (ms) — panel must stay closed this long", 14)]
-        public RangeNode<int> LootPanelGoneMs { get; set; } = new RangeNode<int>(8000, 2000, 120000);
-
-        [Menu("Loot pickup timeout (ms) — stops picking after this time", 16)]
-        public RangeNode<int> LootPickupTimeoutMs { get; set; } = new RangeNode<int>(15000, 1000, 60000);
-
-        [Menu("Loot pickup click interval (ms)", 17)]
-        public RangeNode<int> LootPickupIntervalMs { get; set; } = new RangeNode<int>(200, 50, 2000);
-
-        [Menu("Loot pickup max distance (units from player)", 18)]
-        public RangeNode<int> LootPickupMaxDistance { get; set; } = new RangeNode<int>(300, 50, 800);
-
-        [Menu("Loot monster check distance (units) — no loot clicks while hostiles are closer", 19)]
-        public RangeNode<int> LootMonsterDistance { get; set; } = new RangeNode<int>(40, 10, 400);
-
-        [Menu("Loot max walk distance (units) — stop looting when you walk this far from the ultimatum", 20)]
-        public RangeNode<int> LootMaxWalkDistance { get; set; } = new RangeNode<int>(300, 50, 800);
 
         [Menu("Debug logging", 10)]
         public ToggleNode Debug { get; set; } = new ToggleNode(false);
