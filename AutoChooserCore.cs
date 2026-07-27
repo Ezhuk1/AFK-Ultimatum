@@ -35,7 +35,6 @@ namespace AutoChooser
         private DateTime _lootPhaseStart = DateTime.MinValue;
         private DateTime _lastLootClick = DateTime.MinValue;
         private bool _panelWasVisible;
-        private bool _panelWasVisible;
 
         public override bool Initialise()
         {
