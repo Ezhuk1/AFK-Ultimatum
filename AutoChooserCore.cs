@@ -33,8 +33,6 @@ namespace AutoChooser
         private bool _lootPhaseActive;
         private DateTime _lootPhaseStart = DateTime.MinValue;
         private DateTime _lastLootClick = DateTime.MinValue;
-        private DateTime _lastPanelVisibleTime = DateTime.MinValue;
-        private bool _lootPending;
 
         public override bool Initialise()
         {
@@ -47,6 +45,29 @@ namespace AutoChooser
         [DllImport("user32.dll")]
         private static extern short GetAsyncKeyState(int vKey);
 
+        private const string UltimatumChallengePath = "Leagues/Ultimatum/Objects/UltimatumChallengeInteractable";
+
+        private bool IsUltimatumEncounterActive()
+        {
+            try
+            {
+                var entities = GameController?.EntityListWrapper?.OnlyValidEntities;
+                if (entities == null) return false;
+
+                foreach (var entity in entities)
+                {
+                    if (entity?.Path?.Contains(UltimatumChallengePath) == true)
+                        return true;
+                }
+            }
+            catch
+            {
+                // Silently handle — entity list may be invalid mid-frame.
+            }
+
+            return false;
+        }
+
         private bool CheckPauseHotkey()
         {
             int vk = (int)(Keys)Settings.PauseHotkey.Value;
@@ -56,7 +77,6 @@ namespace AutoChooser
                 _pauseUntil = DateTime.UtcNow.AddMilliseconds(Settings.PauseDurationMs.Value);
                 _panelActive = false;
                 _lootPhaseActive = false;
-                _lootPending = false;
                 _votedThisRound = false;
                 _lastHandle = DateTime.MinValue;
                 _followerWaitStart = DateTime.MinValue;
@@ -74,7 +94,6 @@ namespace AutoChooser
             {
                 _panelActive = false;
                 _lootPhaseActive = false;
-                _lootPending = false;
                 _pauseUntil = DateTime.MinValue;
                 _pauseHotkeyWasPressed = false;
                 return;
@@ -89,15 +108,19 @@ namespace AutoChooser
 
             var panel = GameController?.IngameState?.IngameUi?.UltimatumPanel;
 
-            // Loot pickup phase: panel is gone, click visible ground items.
+            // Loot pickup phase: encounter ended, click visible ground items.
             if (_lootPhaseActive)
             {
                 if (panel != null && panel.IsVisible)
                 {
-                    // Panel came back — stop looting.
                     _lootPhaseActive = false;
-                    _lootPending = false;
-                    _lastPanelVisibleTime = DateTime.UtcNow;
+                    return;
+                }
+
+                if (IsUltimatumEncounterActive())
+                {
+                    _lootPhaseActive = false;
+                    LogMessage("AutoChooser: loot stopped — encounter still active.");
                     return;
                 }
 
@@ -106,7 +129,6 @@ namespace AutoChooser
                 if ((lootNow - _lootPhaseStart).TotalMilliseconds >= Settings.LootPickupTimeoutMs.Value)
                 {
                     _lootPhaseActive = false;
-                    _lootPending = false;
                     LogMessage("AutoChooser: loot pickup ended (timeout).");
                     return;
                 }
@@ -120,49 +142,22 @@ namespace AutoChooser
                 return;
             }
 
-            // Track when the panel was last visible.
-            if (panel != null && panel.IsVisible)
+            if (panel == null || !panel.IsVisible)
             {
-                _lastPanelVisibleTime = DateTime.UtcNow;
-            }
-
-            // Loot pending: panel was closed, waiting to see if it comes back.
-            if (_lootPending)
-            {
-                if (panel != null && panel.IsVisible)
+                if (_panelActive)
                 {
-                    // Panel came back (next wave) — cancel loot pending.
-                    _lootPending = false;
-                    _panelActive = true;
-                    _panelOpenTime = DateTime.UtcNow;
-                    return;
-                }
+                    if (IsUltimatumEncounterActive())
+                    {
+                        return;
+                    }
 
-                // Only start loot if panel hasn't been visible for the full delay.
-                double sinceLastSeen = (DateTime.UtcNow - _lastPanelVisibleTime).TotalMilliseconds;
-                if (sinceLastSeen >= Settings.LootStartDelayMs.Value)
-                {
-                    _lootPending = false;
                     if (Settings.LootPickupEnabled.Value)
                     {
                         _lootPhaseActive = true;
                         _lootPhaseStart = DateTime.UtcNow;
                         _lastLootClick = DateTime.MinValue;
-                        LogMessage("AutoChooser: panel gone long enough, starting loot pickup.");
+                        LogMessage("AutoChooser: encounter ended, starting loot pickup.");
                     }
-                }
-
-                return;
-            }
-
-            if (panel == null || !panel.IsVisible)
-            {
-                // Panel closed — start grace delay.
-                if (_panelActive && Settings.LootPickupEnabled.Value && !_lootPending)
-                {
-                    _lootPending = true;
-                    _lastPanelVisibleTime = DateTime.UtcNow;
-                    LogMessage("AutoChooser: panel closed, waiting before loot pickup.");
                 }
 
                 _panelActive = false;
@@ -180,7 +175,6 @@ namespace AutoChooser
             {
                 _panelActive = true;
                 _panelOpenTime = now;
-                _lootPending = false;
                 return;
             }
 
@@ -1104,9 +1098,6 @@ namespace AutoChooser
 
         [Menu("Loot pickup max distance (px from player)", 16)]
         public RangeNode<int> LootPickupMaxDistance { get; set; } = new RangeNode<int>(300, 50, 800);
-
-        [Menu("Loot start delay (ms) — wait this long after panel closes before looting", 17)]
-        public RangeNode<int> LootStartDelayMs { get; set; } = new RangeNode<int>(3000, 500, 8000);
 
         [Menu("Debug logging", 10)]
         public ToggleNode Debug { get; set; } = new ToggleNode(false);
