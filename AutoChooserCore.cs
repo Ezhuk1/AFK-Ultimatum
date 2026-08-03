@@ -84,6 +84,154 @@ namespace AutoChooser
             }
         }
 
+        // Reads an element's visible text, tolerating the reads that throw
+        // while the UI is mid-rebuild. Used to recognise the Ultimatum panel by
+        // its own labels.
+        private static string SafeText(Element e, int max)
+        {
+            try
+            {
+                string t = e?.GetText(max);
+                if (string.IsNullOrWhiteSpace(t)) t = e?.Text;
+                if (string.IsNullOrWhiteSpace(t)) return string.Empty;
+                t = Normalize(t);
+                return t.Length > max ? t.Substring(0, max) : t;
+            }
+            catch { return string.Empty; }
+        }
+
+
+        // --- Panel location ---------------------------------------------------
+        // IngameUi.UltimatumPanel points at the wrong element on this build (it
+        // resolves to the Expedition tab), so the panel is located by content
+        // instead: a visible, panel-sized top-level child of IngameUi whose
+        // subtree carries the Ultimatum texts ("accept trial", "take rewards",
+        // "Rewards earned", "Round {n/m}").
+        //
+        // Only the ROOT pointer is broken. Once the right root is found, the
+        // child indices ExileCore uses are still correct on this UI - the
+        // confirm button really is at [2][6][0] - so the located element is
+        // wrapped back into an UltimatumPanel and all existing logic applies.
+        private UltimatumPanel _cachedPanel;
+        private long _cachedPanelAddr;
+        private DateTime _lastPanelSearch = DateTime.MinValue;
+        private const int PanelSearchIntervalMs = 250;
+        private const float PanelMinWidth = 600f;
+        private const float PanelMinHeight = 300f;
+
+        // Texts that only ever appear on the Ultimatum screen. Matched
+        // case-insensitively as substrings, so the "<ultimatumnumber>{5}
+        // Rewards earned" markup still matches "rewards earned".
+        private static readonly string[] PanelMarkers =
+        {
+            "accept trial", "take rewards", "rewards earned",
+            "current rewards", "next reward"
+        };
+
+        private UltimatumPanel ResolveUltimatumPanel(DateTime now)
+        {
+            // Re-validate the cached element every frame (cheap); only run the
+            // full tree search when it has gone stale.
+            if (_cachedPanel != null)
+            {
+                try
+                {
+                    if (_cachedPanel.IsValid && _cachedPanel.Address == _cachedPanelAddr && LooksLikePanel(_cachedPanel))
+                        return _cachedPanel;
+                }
+                catch { }
+
+                _cachedPanel = null;
+                _cachedPanelAddr = 0;
+            }
+
+            // Searching the whole UI tree is not free, so it is throttled while
+            // no panel is cached.
+            if ((now - _lastPanelSearch).TotalMilliseconds < PanelSearchIntervalMs)
+                return null;
+            _lastPanelSearch = now;
+
+            var ui = GameController?.IngameState?.IngameUi;
+            if (ui == null) return null;
+
+            try
+            {
+                long rc = ui.ChildCount;
+                for (int i = 0; i < rc; i++)
+                {
+                    Element c = null;
+                    try { c = ui.GetChildAtIndex(i); } catch { continue; }
+                    if (c == null) continue;
+
+                    if (!IsPanelSized(c)) continue;
+                    if (!SubtreeHasMarker(c, 0)) continue;
+
+                    var found = c.AsObject<UltimatumPanel>();
+                    if (found == null) continue;
+
+                    _cachedPanel = found;
+                    _cachedPanelAddr = c.Address;
+                    Log($"AutoChooser: ultimatum panel located at IngameUi[{i}] 0x{c.Address:X}.");
+                    return found;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"AutoChooser: panel search failed: {ex.Message}");
+            }
+
+            return null;
+        }
+
+        private bool LooksLikePanel(Element el)
+        {
+            return IsPanelSized(el) && SubtreeHasMarker(el, 0);
+        }
+
+        private static bool IsPanelSized(Element el)
+        {
+            try
+            {
+                if (!el.IsValid || !el.IsVisible) return false;
+                var r = el.GetClientRect();
+                return r.Width >= PanelMinWidth && r.Height >= PanelMinHeight;
+            }
+            catch { return false; }
+        }
+
+        // Depth 6 is enough: the deepest marker on this UI is at [2][6][0][0].
+        private bool SubtreeHasMarker(Element el, int depth)
+        {
+            if (el == null || depth > 6) return false;
+
+            long kids = 0;
+            try
+            {
+                if (!el.IsValid) return false;
+                kids = el.ChildCount;
+
+                string text = SafeText(el, 80);
+                if (text.Length > 0)
+                {
+                    string low = text.ToLowerInvariant();
+                    for (int m = 0; m < PanelMarkers.Length; m++)
+                        if (low.Contains(PanelMarkers[m], StringComparison.Ordinal))
+                            return true;
+                }
+            }
+            catch { return false; }
+
+            for (int i = 0; i < kids; i++)
+            {
+                Element child = null;
+                try { child = el.GetChildAtIndex(i); } catch { continue; }
+                if (child == null) continue;
+                if (SubtreeHasMarker(child, depth + 1)) return true;
+            }
+
+            return false;
+        }
+
         private bool _pauseHotkeyWasPressed;
 
         [DllImport("user32.dll")]
@@ -135,9 +283,18 @@ namespace AutoChooser
                 return;
             }
 
-            var panel = GameController?.IngameState?.IngameUi?.UltimatumPanel;
-            bool panelVisible = panel != null && panel.IsVisible;
             DateTime now = DateTime.UtcNow;
+
+            var panel = ResolveUltimatumPanel(now);
+            bool panelVisible = false;
+            try
+            {
+                panelVisible = panel != null && panel.IsVisible;
+            }
+            catch (Exception ex)
+            {
+                Log($"AutoChooser: panel visibility read failed: {ex.Message}");
+            }
 
             // Loot pickup phase: panel is gone, click visible ground items.
             if (_lootPhaseActive)

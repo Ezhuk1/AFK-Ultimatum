@@ -1,6 +1,6 @@
 # AFK Ultimatum
 
-**Version: v11**
+**Version: v12**
 
 An [ExileApi](https://github.com/exApiTools/ExileApi-Compiled) plugin (PoE 3.28 HUD) that automatically picks one of the three **Ultimatum** reward cards by priority and presses the confirm button — using smooth, human-like mouse movement.
 
@@ -88,7 +88,13 @@ remaining ones the plugin picks the one with the **smallest** priority value.
 
 ## How it works
 
-1. The plugin watches the in-game `UltimatumPanel` (strongly-typed ExileApi API).
+1. The plugin locates the in-game Ultimatum panel **by content**: a visible,
+   panel-sized child of `IngameUi` whose subtree carries the screen's own
+   labels (`accept trial`, `take rewards`, `Rewards earned`, `Current Rewards`,
+   `Next Reward`). The found element is wrapped back into ExileApi's
+   `UltimatumPanel` type, so the strongly-typed API (`ChoicesPanel`,
+   `ConfirmButton`, `Modifiers`, `SelectedChoice`) is used as before.
+   `IngameUi.UltimatumPanel` is deliberately **not** used — see below.
 2. When the panel becomes visible, it waits `Settle delay` ms.
 3. It reads the three offered modifiers and looks up each one's priority.
 4. **Leader mode** (`Party Leader` checked): it clicks the card with the lowest
@@ -144,13 +150,36 @@ its own entry, not the base `"Blistering Cold"`.
 
 ## Notes
 
-- Card detection uses the strongly-typed `GameController.IngameState.IngameUi.UltimatumPanel` API.
+- Card detection locates the panel by its own on-screen labels, then uses the
+  strongly-typed `UltimatumPanel` API on the located element.
+  `GameController.IngameState.IngameUi.UltimatumPanel` is **not** used: on the
+  current ExileApi build that property resolves to the wrong element (the
+  Expedition tab), so `ChoicesPanel` and `ConfirmButton` always came back
+  `null`. The child indices *inside* the panel are still correct, which is why
+  only the lookup of the panel root had to change.
+- The panel's position in the UI tree is not fixed — it sits among the world
+  labels, so its index shifts from map to map. Nothing in the plugin is tied to
+  a specific index; the located element is cached and re-validated each frame,
+  and a full search runs at most every 250 ms.
 - Mouse input is performed via `user32` (`SetCursorPos` + `mouse_event`) so the real cursor moves on screen.
 - Enable **Debug logging** if you want to see the exact click coordinates and selection checks in the ExileApi log.
 
 ---
 
 ## Changelog
+
+### v12
+- **Fixed: the Ultimatum was no longer detected after the ExileApi update.**
+  `IngameUi.UltimatumPanel` resolves to the wrong element on the new build (it
+  lands on the Expedition tab), so `ChoicesPanel` / `ConfirmButton` were always
+  `null` and the plugin sat idle through every encounter. The panel is now
+  located by its own labels (`accept trial`, `take rewards`, `Rewards earned`,
+  `Current Rewards`, `Next Reward`) among the children of `IngameUi`, then cast
+  back to `UltimatumPanel`. The child indices inside the panel were never
+  wrong, so card selection, party voting and looting are unchanged.
+- The located panel is cached and re-validated per frame; a full tree search
+  runs at most every 250 ms. No UI index is hardcoded — the panel sits among
+  the world labels and its index shifts from map to map.
 
 ### v11
 - **Loot tuning fully removed from the settings UI.** ExileCore renders public
