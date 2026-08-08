@@ -1,6 +1,6 @@
 # AFK Ultimatum
 
-**Version: v12**
+**Version: v22**
 
 An [ExileApi](https://github.com/exApiTools/ExileApi-Compiled) plugin (PoE 3.28 HUD) that automatically picks one of the three **Ultimatum** reward cards by priority and presses the confirm button — using smooth, human-like mouse movement.
 
@@ -48,10 +48,11 @@ Open the plugin settings window inside ExileApi. The following options are avail
 |----------|-------------|---------|
 | **Enable** | Master on/off switch for the plugin. | `false` |
 | **Party Leader** | When checked, this client picks the modifier by priority (solo or as the party leader). When unchecked, the plugin is a **follower**: it waits for party votes and clicks the card with the most votes — i.e. the leader's pick, since the leader votes first and the group follows. | `true` |
+| **Grueling Gauntlet** | For Inscribed Ultimatums where the game chooses the modifiers for you. No card is clicked and the priority list is ignored — the plugin just presses **Accept Trial** each round. If the chosen modifier has its **stop checkbox** ticked in the priority list, it presses **Take Rewards** instead and ends the run. | `false` |
+| **Auto-start** | Presses **BEGIN** on the pre-encounter screen, so the Ultimatum starts without a manual click. | `true` |
 | **Pause hotkey** | Press to make the bot stop clicking/selecting for the duration below, then auto-resume. | `F` |
 | **Pause duration (ms)** | How long the bot stays paused after the hotkey is pressed. | `6000` |
 | **Force pick when all avoided** | If all 3 visible cards are set to `100` (never), pick the least-bad one anyway (so you don't get stuck). | `true` |
-| **Default priority** | Priority used for a modifier that is not in the known list. | `20` |
 | **Delay between option and start click (ms)** | Pause between clicking the card and clicking confirm. | `300` |
 | **Wait after panel opens before clicking (ms)** | Settling delay so the UI is fully interactive before acting. | `250` |
 | **Retry interval while panel stays open (ms)** | How often to re-attempt if the confirm did not register and the panel is still open. | `1500` |
@@ -61,9 +62,20 @@ Open the plugin settings window inside ExileApi. The following options are avail
 | **Debug logging** | Logs click coordinates and selection state to the ExileApi log. | `false` |
 | **Loot pickup** | After the ultimatum encounter ends, click visible ground items (uses your in-game loot filter). | `true` |
 
-Loot tuning is intentionally kept out of the settings UI. Built-in defaults:
-panel-gone wait 8 s, loot phase timeout 15 s, click interval 200 ms, pickup
-range 100 units, monster click-gate 40 units, walk-away cancel 150 units.
+The bot also stops on its own whenever the **in-game pause menu (Esc)** is open,
+and resumes when you close it. That needs no setting and cannot be turned off —
+the game is frozen, so nothing the plugin could click would do anything anyway.
+
+Some values are fixed in code rather than exposed as sliders:
+
+- **Auto-start distance — 35 units.** BEGIN is only pressed once the altar is
+  this close (the start screen is a world label and stays clickable from across
+  the map). Auto-start also waits for the character to stand still.
+- **Priority for an unknown modifier — 20.** Applies only to a modifier that is
+  not in the list below, i.e. something the game has added since.
+- **Loot tuning.** Panel-gone wait 8 s, loot phase timeout 15 s, click interval
+  200 ms, pickup range 100 units, monster click-gate 40 units, walk-away cancel
+  150 units.
 
 ### Priority sliders
 
@@ -84,10 +96,36 @@ Example setup for Ultimatum:
 From the three cards on screen, cards set to **100** are dropped; among the
 remaining ones the plugin picks the one with the **smallest** priority value.
 
+### Stop checkboxes (Grueling Gauntlet)
+
+Each slider has a checkbox in front of it. It does nothing in normal play — it
+only matters while **Grueling Gauntlet** is enabled, where the game picks the
+modifier itself and the priority values are ignored.
+
+- Ticked → when the game picks that modifier, the plugin presses **Take
+  Rewards** and ends the run instead of accepting the next trial.
+- `Drought` is ticked out of the box (flasks gain no charges, so the run is not
+  worth continuing).
+- **Clear all stoppers** unticks everything; **Reset to defaults** restores both
+  the sliders and the checkboxes.
+
+Note this is independent of the `100` priority value: `100` means "don't pick
+this card" in normal play, while a ticked checkbox means "abandon the run" in
+Gauntlet mode.
+
 ---
 
 ## How it works
 
+0. **Auto-start.** Before the encounter runs, the altar shows a small
+   pre-encounter panel (reward preview, the encounter line, three modifier
+   icons, **BEGIN**). While no main panel is up, the plugin finds that BEGIN
+   button and presses it — but only once the altar is within **Auto-start max
+   distance**, since that panel is a world label and stays clickable from across
+   the map. It is a different panel from the one below — see Notes — and `begin`
+   only counts as a match when an ancestor also carries the round timer (`0:00`)
+   or an encounter-type line, so other "begin" buttons in the game can't
+   trigger it.
 1. The plugin locates the in-game Ultimatum panel **by content**: a visible,
    panel-sized child of `IngameUi` whose subtree carries the screen's own
    labels (`accept trial`, `take rewards`, `Rewards earned`, `Current Rewards`,
@@ -97,6 +135,10 @@ remaining ones the plugin picks the one with the **smallest** priority value.
    `IngameUi.UltimatumPanel` is deliberately **not** used — see below.
 2. When the panel becomes visible, it waits `Settle delay` ms.
 3. It reads the three offered modifiers and looks up each one's priority.
+   - **Grueling Gauntlet mode** short-circuits everything from here on: the
+     game has already chosen the modifier, so the plugin only presses **Accept
+     Trial** — or **Take Rewards**, if the chosen modifier has its stop
+     checkbox ticked in the priority list.
 4. **Leader mode** (`Party Leader` checked): it clicks the card with the lowest
    priority (smooth eased movement + jitter). **Follower mode** (unchecked): it waits
    for party votes and clicks the card with the most votes (the leader's pick).
@@ -161,12 +203,219 @@ its own entry, not the base `"Blistering Cold"`.
   labels, so its index shifts from map to map. Nothing in the plugin is tied to
   a specific index; the located element is cached and re-validated each frame,
   and a full search runs at most every 250 ms.
+- The **pre-encounter (BEGIN) screen is a different panel** from the main one:
+  it hangs off the altar's world label, is far smaller (~335×437) and has none
+  of the `ACCEPT TRIAL` / `TAKE REWARDS` texts, so the main panel lookup does
+  not match it. It is located separately, by its BEGIN button plus an
+  encounter-type line in an ancestor.
 - Mouse input is performed via `user32` (`SetCursorPos` + `mouse_event`) so the real cursor moves on screen.
 - Enable **Debug logging** if you want to see the exact click coordinates and selection checks in the ExileApi log.
 
 ---
 
 ## Changelog
+
+### v22
+- **Fixed: BEGIN was clicked in the middle of a running round.** The "is the
+  altar near me" check matched any entity with `ultimatum` in its path, which
+  includes the encounter's own monsters (`Metadata/Monsters/LeagueUltimatum/…`).
+  Mid-fight it was therefore always true, and the plugin kept pressing the
+  altar's world label — which drifts across the screen with the camera, so the
+  clicks landed in random corners (`(67,996)`, `(33,548)` in the logs).
+  - Monsters are now excluded from that check. Excluding them, rather than
+    whitelisting the altar's own metadata path, means a renamed altar object
+    cannot silently disable auto-start.
+  - Added an independent gate: while any live hostile `LeagueUltimatum` monster
+    exists, a round is considered in progress and auto-start does nothing. Two
+    separate barriers, so one wrong assumption no longer opens the door.
+- **Fixed: the stand-still check never passed.** `Actor.Action`'s `Moving` bit
+  and `Actor.isMoving` both stay set while the character is standing still
+  (logged: `rawAction=4224 flagMoving=True` with no grid movement). Worse, the
+  old code refreshed the position baseline on every frame the flag was set, so
+  the position check could never contradict it — auto-start stalled for minutes
+  at a time. Grid position is now the only signal; both flags are diagnostic
+  output only.
+- **Fixed: the Esc pause detector froze the plugin.** `Game.IsEscapeState` and
+  `EscapeState.IsActive` read `true` during normal play — the escape state is
+  always present in the game's state stack. They had been promoted to the
+  primary signal and the plugin sat in "game paused, holding off" forever
+  without Esc ever being pressed. Detection is back to the pause menu's own
+  visible UI (its `Resume Game` button), and the flags are not consulted.
+
+### v21
+- **Two sliders removed from the settings UI**, their values fixed in code:
+  - *Auto-start max distance* → **35 units**. The useful range turned out to be
+    narrow — too small and you cannot get close enough to the altar's centre,
+    too large and the encounter starts while walking in.
+  - *Priority used when a modifier is not in the list* → **20**. The list covers
+    every known modifier, so this only ever applied to something the game has
+    added since, and "take it only if nothing better is offered" is the sane
+    answer for an unknown.
+- Fixed the settings table in this file: the note about the Esc pause menu had
+  been inserted into the middle of it, splitting the table in two.
+
+### v20
+- **Auto-start now waits for the character to stand still.** The pre-encounter
+  screen is pinned to the altar, so while running it slides across the screen
+  with the camera and every click chases a target that has already moved — the
+  logs showed BEGIN presses scattered from one side of the screen to the other.
+  Nothing is clicked until movement has stopped for 350 ms.
+  - Movement is read from the player's `Actor.Action` flag, with a grid-position
+    check as a second opinion: the flag can miss a frame, and a stuck "still
+    moving" would block auto-start entirely.
+  - An unreadable player state counts as "standing still", so this can never
+    freeze the plugin.
+- **Card selection on the start screen, continued.**
+  - The pick is now re-armed per BEGIN button rather than per altar. One altar
+    puts up a new screen for each wave, and keying on the altar left the
+    "already picked" flag set for all of them — one pick followed by a dozen
+    bare BEGIN presses in the log.
+  - Fixed a regression from the previous version: the ancestor scan accepted any
+    element that cast to `UltimatumChoicePanel`, and returned a list of 42 blank
+    modifiers, beating the correct subtree sweep to the answer. It now requires
+    a plausible count (≤6) and at least one recognised modifier name, matching
+    the checks the sweep already had.
+  - Icon-row detection additionally requires the row to be horizontally centred
+    on BEGIN (within 180 px). Without it the search wandered off to square-ish
+    elements at the screen edge.
+  - A card whose name cannot be resolved is no longer a candidate at all. Every
+    unreadable card used to score the default priority, so the "best" one was
+    simply the first in the row — a random modifier picked in the user's name.
+    With nothing recognised the choice is now left to the game.
+
+### v19
+- **The in-game pause menu (Esc) now stops the bot.** While `GAME PAUSED` is up
+  the plugin does nothing at all: the game is frozen, so no click it could make
+  means anything, and clicks aimed at the world would land on the menu instead.
+  The panels stay in memory behind the menu and still read as valid, so without
+  this the bot kept "working" against a frozen game.
+  - Detected through ExileCore's own escape game-state, not by looking for the
+    menu element — the element check would not notice.
+  - Also aborts mid-action: cursor travel, the loot-hover wait and the moment
+    between moving and clicking all bail out if Esc goes up while they run.
+  - Logged once on entering and leaving the pause, not every frame.
+- **Fixed: auto-start gave up permanently with a larger distance limit.** A
+  click aimed at an altar that is on screen but not yet in range registers as a
+  move command — the character walks over and the encounter never starts. v18
+  remembered that button as "already pressed" forever, so the bot then sat there
+  doing nothing in front of a start screen that was still up.
+  - The same button is now retried after 6 s instead of being latched for good.
+  - Reach is re-checked immediately before the click, not only when the button
+    is found: the search runs on its own throttle and the cursor takes time to
+    travel, so the character can have moved in between.
+
+### v18
+- **Fixed: pausing no longer gets overridden in Grueling Gauntlet.** Pressing the
+  pause hotkey mid-click left the plugin latched on "bank this run": the click
+  was abandoned before it fired, but the flag stayed set, so after taking over
+  and choosing to continue manually the bot kept pressing **Take Rewards** over
+  that decision. The log gave it away — `pressed take rewards (0/4)`, a click
+  that was counted but never happened.
+  - `ClickElement` now reports whether a click actually fired, and the banking
+    latch is only kept when it did.
+  - The pause hotkey clears the latch outright: pausing means the user is taking
+    over, so no earlier decision of the bot's should survive it.
+- **Fixed: BEGIN pressed repeatedly on the same screen.** The start screen
+  lingers for a moment after the click, and the cooldown alone did not cover it —
+  the log showed the same spot clicked five times in ten seconds. The plugin now
+  remembers the button it pressed and never presses that same element again; the
+  next encounter's altar is a different element, so nothing is lost.
+- **Auto-start default distance lowered to 20 units** (was 40). At 40 the altar
+  could still be far enough that the encounter started while walking in.
+
+### v17
+- **Fixed: auto-start pressed BEGIN from across the map.** The start screen is a
+  world label pinned to the altar, so it stays on screen — and clickable — from
+  far away, and its screen position slides around as the camera moves. The log
+  showed clicks scattered at `(1458,142)`, `(271,871)`, `(1094,497)`: the same
+  altar, chased across the screen while walking. That both started encounters
+  from a distance and dropped clicks on whatever the drifting label happened to
+  cover.
+  - BEGIN is now only pressed when the altar is within the auto-start distance
+    (a setting at the time, fixed at 35 units in v21), measured from
+    the entity the world label is pinned to. If the label carries no usable
+    entity, the nearest `ultimatum` object in the entity list is used instead,
+    so a change in how labels are wired cannot silently disable auto-start.
+  - The "too far" message is throttled to once every 3 s, so walking to the
+    arena does not flood the log.
+
+### v16
+- **Fixed: auto-start did nothing on most encounters.** The BEGIN button was
+  only recognised when the start screen used one of the phrasings taken from the
+  in-encounter panel (`Survive`, `Protect the Altar`, …), but the start screen
+  words them differently — `Defeat waves of enemies`, `Stand in the Stone
+  Circles` — so nothing matched and the encounter was never started.
+  - The list now covers those too, and, more importantly, the **round timer**
+    (`0:00`) under BEGIN counts as an anchor on its own. That check is
+    wording-independent, so an encounter type nobody has screenshotted yet can
+    no longer break auto-start.
+- **Per-modifier stop checkboxes for Grueling Gauntlet.** Each priority slider
+  now has a checkbox next to it. With Grueling Gauntlet on, the plugin presses
+  **Take Rewards** and ends the run when the game picks any ticked modifier,
+  instead of only `Drought`.
+  - `Drought` is ticked by default, so existing behaviour is unchanged.
+  - **Clear all stoppers** button next to **Reset to defaults**.
+  - Matching goes through the same longest-substring rule as the priorities, so
+    tiered names resolve to their own entry (`Quicksand III` ticks Quicksand
+    III, not Quicksand).
+  - The flags are stored index-aligned with the modifier list and are padded or
+    trimmed on use, so a config saved by an older build (no flags, or fewer than
+    the current list) still loads and keeps whatever was already ticked.
+
+### v15
+- **New setting: Auto-start (on by default).** The Ultimatum's pre-encounter
+  screen — reward preview, the encounter line ("Survive / Monsters Enrage after
+  a time"), three modifier icons and a **BEGIN** button — is now detected and
+  BEGIN is pressed automatically, so the encounter starts without a manual
+  click. After that the normal round cycle takes over.
+  - This is a **separate, smaller panel** from the main Ultimatum window: it
+    hangs off the altar's world label, is well under 600 px wide and carries
+    none of the `ACCEPT TRIAL` / `TAKE REWARDS` texts, so the main panel lookup
+    neither matches it nor should.
+  - `begin` on its own is a weak anchor (the Voyage window has a "begin voyage"
+    button), so a match only counts when an ancestor's subtree also carries an
+    encounter-type line (`Survive`, `Protect the Altar`, `Exterminate`,
+    `Stampede`, `Kill the …`).
+  - Checked only when no main panel is up, so it cannot interfere with a
+    running encounter. Clicks are rate-limited to one per 2.5 s, the search is
+    throttled to twice a second and node-budgeted, and the located button is
+    cached. The **Only act when the game window is in the foreground** guard
+    applies here too.
+
+### v14
+- **New setting: Grueling Gauntlet.** On an Inscribed Ultimatum with
+  *"Ultimatum modifiers are chosen for you"* there is nothing to vote on, so
+  card selection and the whole priority list are skipped: the plugin just
+  presses **Accept Trial** each round.
+  - **Drought bails out.** If the modifier the game chose is `Drought` (flasks
+    gain no charges), the plugin presses **Take Rewards** instead and banks the
+    run rather than starting the next wave.
+  - The decision latches: after choosing to bank, the plugin will not press
+    Accept even though the panel briefly shows no cards right after the click.
+    Take Rewards is clicked at most 4 times, then it waits for the panel to
+    close — a stray click there could land on the rewards inventory.
+  - If the chosen card cannot be read, it errs on the safe side and banks when
+    `Drought` is anywhere on screen: accepting a Drought round can cost the
+    whole run, banking early only costs the rounds after this one.
+  - `Take Rewards` has no strongly-typed accessor in ExileApi (only
+    `ConfirmButton`, which is Accept Trial), so it is located by its label.
+  - Priority sliders, party voting and autoloot are untouched and still apply
+    with the checkbox off.
+
+### v13
+- **Silenced the `Priorities ... is not a supported settings element` warning.**
+  ExileCore's settings reflection walked the plain `List<string>` looking for a
+  node type it could draw and logged a warning on every load. The list is now
+  marked `[IgnoreMenu]` — it is still saved and loaded as before (the sliders
+  are drawn by hand in the priority panel). Saved priorities were never
+  affected by this; only the log line was.
+- **`HotkeyNode` → `HotkeyNodeV2`** for the pause hotkey, clearing the obsolete
+  API warning. Existing configs migrate automatically: the old `{"Value": 70}`
+  shape is still read by the new node, so your hotkey is preserved.
+  The key is still polled via `GetAsyncKeyState` rather than the node's own
+  `PressedOnce()`, because the check also runs inside the mouse-travel and
+  loot-hover loops, which execute between rendered frames — ExileCore refreshes
+  its input once per frame and would not see the key until the click finished.
 
 ### v12
 - **Fixed: the Ultimatum was no longer detected after the ExileApi update.**

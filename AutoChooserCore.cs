@@ -50,6 +50,7 @@ namespace AutoChooser
         private uint _lootAreaHash;
         private DateTime _lastLootBlockLog = DateTime.MinValue;
         private System.Numerics.Vector2? _lootAnchor;
+        private bool _gamePausedLatch;
         private const int MonsterCheckIntervalMs = 250;
         private const int LootNoItemsGraceMs = 2500;
         private const int LootPendingMaxMs = 300000;
@@ -100,6 +101,123 @@ namespace AutoChooser
             catch { return string.Empty; }
         }
 
+
+        // True while the Esc menu ("GAME PAUSED") is up.
+        //
+        // NB: Game.IsEscapeState and EscapeState.IsActive are NOT usable for
+        // this - the escape state exists in the game's state stack at all times,
+        // so both read true even while playing normally. Using them froze the
+        // plugin permanently. What is actually distinctive is the menu's own
+        // UI, so we look for its "Resume Game" button inside the escape state's
+        // own UI root (a tiny subtree, unlike a full IngameUi walk).
+        //
+        // This check fails OPEN on purpose: anything unreadable means "not
+        // paused". A false negative costs a stray click; a false positive stops
+        // the plugin dead, which is exactly what went wrong before.
+        private bool _gamePausedCache;
+        private DateTime _lastPauseCheck = DateTime.MinValue;
+        private const int PauseCheckIntervalMs = 200;
+        private const string PauseMenuMarker = "resume game";
+
+        // Cheap enough to run on demand: reads two booleans off the game state
+        // and skips the UI walk. Used at the click sites, where a 200 ms-stale
+        // cached answer would be too slow - the menu can go up mid-action.
+        private bool IsGamePausedNow()
+        {
+            // Deliberately runs the full detection instead of reading the escape
+            // state flags: those are always true (see above), so short-cutting
+            // through them reports "paused" during normal play. The walk is over
+            // the escape state's own UI root, which is small enough to run at a
+            // click site.
+            return DetectPauseMenu();
+        }
+
+        private bool IsGamePaused()
+        {
+            DateTime now = DateTime.UtcNow;
+            if ((now - _lastPauseCheck).TotalMilliseconds < PauseCheckIntervalMs)
+            {
+                return _gamePausedCache;
+            }
+
+            _lastPauseCheck = now;
+            bool detected = DetectPauseMenu();
+
+            // One-line trace of what the pause detection actually sees. The
+            // previous attempt at this check froze the plugin for a whole
+            // session before the logs explained why, so the raw inputs are
+            // worth having whenever Debug logging is on.
+            if (Settings.Debug.Value && detected != _gamePausedCache)
+            {
+                bool rawEscapeState = false, rawIsActive = false;
+                bool haveRoot = false;
+                try { rawEscapeState = GameController?.Game?.IsEscapeState ?? false; } catch { }
+                try { rawIsActive = GameController?.Game?.EscapeState?.IsActive ?? false; } catch { }
+                try { haveRoot = GameController?.Game?.EscapeState?.UIRoot?.IsValid ?? false; } catch { }
+                Log($"AutoChooser[pause]: menuVisible={detected} " +
+                    $"(Game.IsEscapeState={rawEscapeState}, EscapeState.IsActive={rawIsActive}, uiRootValid={haveRoot})");
+            }
+
+            _gamePausedCache = detected;
+            return _gamePausedCache;
+        }
+
+        private bool DetectPauseMenu()
+        {
+            // The menu's own visible UI is the ONLY signal used here. An earlier
+            // revision promoted Game.IsEscapeState / EscapeState.IsActive to the
+            // primary check on the theory that they track the menu; they do not
+            // (both read true during normal play), and the plugin froze with
+            // "game paused (Esc menu), holding off" without Esc ever being
+            // pressed. Do not reintroduce them.
+            try
+            {
+                var game = GameController?.Game;
+                if (game == null) return false;
+
+                var root = game.EscapeState?.UIRoot;
+                if (root == null || !root.IsValid) return false;
+
+                return SubtreeHasPauseMarker(root, 0);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private bool SubtreeHasPauseMarker(Element el, int depth)
+        {
+            if (el == null || depth > 8) return false;
+
+            long kids = 0;
+            try
+            {
+                if (!el.IsValid) return false;
+                kids = el.ChildCount;
+
+                string text = SafeText(el, 40);
+                if (text.Length > 0 &&
+                    text.IndexOf(PauseMenuMarker, StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    // The menu's elements linger after it closes, so require a
+                    // real on-screen rect rather than mere existence.
+                    var r = el.GetClientRect();
+                    if (r.Width > 0 && r.Height > 0 && IsOnScreen(r)) return true;
+                }
+            }
+            catch { return false; }
+
+            for (int i = 0; i < kids; i++)
+            {
+                Element child = null;
+                try { child = el.GetChildAtIndex(i); } catch { continue; }
+                if (child == null) continue;
+                if (SubtreeHasPauseMarker(child, depth + 1)) return true;
+            }
+
+            return false;
+        }
 
         // --- Panel location ---------------------------------------------------
         // IngameUi.UltimatumPanel points at the wrong element on this build (it
@@ -232,14 +350,1323 @@ namespace AutoChooser
             return false;
         }
 
+        // --- Start screen ("BEGIN") -------------------------------------------
+        // Before the encounter runs there is a separate, smaller panel: reward
+        // preview on top, the encounter line ("Survive / Monsters Enrage after
+        // a time"), three modifier icons, and a BEGIN button. It is NOT the
+        // main Ultimatum panel - it hangs off the altar's world label, well
+        // under 600px wide and without any of the ACCEPT TRIAL / TAKE REWARDS
+        // texts - so ResolveUltimatumPanel does not (and should not) match it.
+        //
+        // "begin" alone is far too weak an anchor (the Voyage window has a
+        // "begin voyage" button, for one), so a match only counts when an
+        // ancestor's subtree also carries an encounter-type line.
+        private DateTime _lastStartSearch = DateTime.MinValue;
+        private DateTime _lastStartClick = DateTime.MinValue;
+        private DateTime _lastPanelSeen = DateTime.MinValue;
+        private long _startedButtonAddr;
+        private DateTime _startedButtonAt = DateTime.MinValue;
+
+        // Quiet window after the main panel was last visible before auto-start
+        // is allowed to act. Covers the moment the panel closes, when its
+        // leftovers still read as a start screen.
+        private const int StartAfterPanelQuietMs = 2500;
+
+        // How long the character has to be still before auto-start acts. Short
+        // enough not to feel sluggish, long enough to outlast the little drift
+        // at the end of a move.
+        private const int StartStandStillMs = 350;
+
+        // How long a just-clicked BEGIN is left alone before being retried.
+        // Long enough for the start screen to disappear on a successful press,
+        // short enough that a click which only moved the character is retried
+        // once they have walked into range.
+        private const int StartRetrySameButtonMs = 6000;
+        private const int StartSearchIntervalMs = 500;
+        // Guards against a burst of clicks while the screen lingers. The real
+        // protection is the per-button address check below - this is just a
+        // floor on how often BEGIN can ever be pressed.
+        private const int StartClickCooldownMs = 3000;
+
+        // The start screen is a world label pinned to the altar, so it is on
+        // screen — and clickable — from across the map, and its screen position
+        // slides around as the camera moves. Pressing it from far away is wrong
+        // twice over: the encounter starts while the character is nowhere near
+        // the arena, and the click lands on whatever happens to be under that
+        // drifting label. So the altar has to be close before BEGIN counts, the
+        // same way the loot code gates on distance.
+        // Fixed in code rather than exposed as a slider: the useful range turned
+        // out to be narrow (too small and you cannot get close enough to the
+        // altar's centre, too large and the encounter starts while walking in),
+        // and 35 sits comfortably inside it.
+        private const int StartMaxAltarDistance = 35;
+
+        // "Too far" repeats every search tick while you walk to the arena, so
+        // it is throttled to keep the log readable.
+        private DateTime _lastStartFarLog = DateTime.MinValue;
+        private const int StartFarLogIntervalMs = 3000;
+
+        private void LogStartGated(string message)
+        {
+            DateTime now = DateTime.UtcNow;
+            if ((now - _lastStartFarLog).TotalMilliseconds < StartFarLogIntervalMs) return;
+            _lastStartFarLog = now;
+            Log(message);
+        }
+        private const int StartSearchNodeBudget = 6000;
+        private const int StartSearchMaxDepth = 12;
+
+        // Every encounter type the start screen can announce. The first cut of
+        // this list only had the wording used on the in-encounter panel
+        // ("Survive", "Protect the Altar", ...) and auto-start silently did
+        // nothing on the others - the start screen phrases them differently
+        // ("Defeat waves of enemies", "Stand in the Stone Circles").
+        //
+        // Kept deliberately loose: single distinctive words rather than whole
+        // sentences, so wording tweaks between encounters don't break it again.
+        private static readonly string[] EncounterTypeMarkers =
+        {
+            "survive",          // Survive / Monsters Enrage after a time
+            "defeat waves",     // Defeat waves of enemies
+            "stone circles",    // Stand in the Stone Circles
+            "protect the altar",
+            "exterminate",
+            "stampede",
+            "kill the",
+            "trialmaster"       // the boss round announces itself by name
+        };
+
+        // A dismissed panel keeps its element alive on this UI, but the game
+        // parks it off-screen (the closed panel's children sat at negative
+        // coordinates in the UI dumps). Requiring the button to be inside the
+        // window is what stops auto-start from clicking a stale BEGIN.
+        private bool IsOnScreen(RectangleF r)
+        {
+            try
+            {
+                var window = GameController?.Window;
+                if (window == null) return false;
+
+                RectangleF w = window.GetWindowRectangleTimeCache;
+                float cx = r.X + r.Width / 2f;
+                float cy = r.Y + r.Height / 2f;
+                return cx >= 0 && cy >= 0 && cx <= w.Width && cy <= w.Height;
+            }
+            catch { return false; }
+        }
+
+        // --- Start-screen card selection --------------------------------------
+        // The pre-encounter screen shows the three offered modifiers as round
+        // icons above BEGIN. They carry no text, so the names come from the
+        // altar entity's UltimatumTrial component instead - same names the
+        // priority list uses. The icons sit in a row directly above the button,
+        // in the same order as the component's Modifiers list.
+        private bool _startCardPicked;
+        private long _startCardAltarAddr;
+        private long _startCardButtonAddr;
+
+        private bool TryPickStartCard(Element beginButton, DateTime now, List<string> names, long altarAddr)
+        {
+            // A new start screen means a fresh choice. Keyed on the BEGIN
+            // button's own address rather than the altar's: the same altar puts
+            // up a new screen for each wave, and keying on the altar left the
+            // "already picked" flag set for all of them - the log showed one
+            // pick followed by a dozen bare BEGIN presses.
+            long buttonAddr = 0;
+            try { buttonAddr = beginButton.Address; } catch { }
+
+            if (buttonAddr != 0 && buttonAddr != _startCardButtonAddr)
+            {
+                _startCardPicked = false;
+                _startCardButtonAddr = buttonAddr;
+            }
+
+            if (altarAddr != 0 && altarAddr != _startCardAltarAddr)
+            {
+                _startCardPicked = false;
+                _startCardAltarAddr = altarAddr;
+            }
+
+            if (_startCardPicked) return false;
+
+            var icons = FindStartCardIcons(beginButton, names != null && names.Count > 0 ? names.Count : 3);
+            if (icons == null || icons.Count == 0)
+            {
+                // Geometry-based icon detection failed. Dump what the area above
+                // BEGIN actually contains so the thresholds can be corrected
+                // from real numbers instead of guessed at again.
+                Log($"AutoChooser: start screen - modifier icons not found" +
+                    $"{(names == null || names.Count == 0 ? "" : $" for {names.Count} modifiers ({string.Join(" | ", names)})")}" +
+                    ", starting without a pick.");
+                if (Settings.Debug.Value) DumpStartScreenGeometry(beginButton);
+                _startCardPicked = true;   // do not retry every pass
+                return false;
+            }
+
+            // No names from the altar component. Try the same typed read the
+            // in-encounter panel uses - that one is exact and costs nothing -
+            // and only fall back to hovering the icons if it comes up empty.
+            if (names == null || names.Count == 0)
+            {
+                names = ReadStartScreenModifiersTyped(beginButton);
+            }
+
+            if (names == null || names.Count == 0)
+            {
+                names = ReadModifiersByHover(icons);
+                if (names == null || names.Count == 0)
+                {
+                    Log("AutoChooser: start screen - could not read modifier names at all, starting without a pick.");
+
+                    // Show what was taken for the icon row: if those rects are
+                    // the button or its frame, the row detection is what needs
+                    // fixing, not the name lookup.
+                    if (Settings.Debug.Value)
+                    {
+                        for (int i = 0; i < icons.Count; i++)
+                        {
+                            try
+                            {
+                                var ir = icons[i].GetClientRect();
+                                Log($"AutoChooser[cards]: icon[{i}] 0x{icons[i].Address:X} " +
+                                    $"({ir.Width:0}x{ir.Height:0}@{ir.X:0},{ir.Y:0}) kids={icons[i].ChildCount}");
+                            }
+                            catch { }
+                        }
+
+                        DumpStartScreenGeometry(beginButton);
+                    }
+
+                    _startCardPicked = true;
+                    return false;
+                }
+            }
+
+            int count = Math.Min(icons.Count, names.Count);
+
+            // Never pick blind. With no readable names every card scores the
+            // default priority and the "best" one is just the first in the row -
+            // a random modifier chosen in the user's name. Better to leave the
+            // choice to the game than to make it arbitrarily.
+            int known = 0;
+            for (int i = 0; i < count; i++)
+            {
+                if (!string.IsNullOrWhiteSpace(names[i]) && MatchBaseMod(Normalize(names[i])) >= 0) known++;
+            }
+
+            if (known == 0)
+            {
+                Log("AutoChooser: start screen - no modifier name could be resolved, leaving the choice to the game.");
+                _startCardPicked = true;
+                return false;
+            }
+
+            int bestIdx = -1;
+            int bestPriority = int.MaxValue;
+
+            for (int i = 0; i < count; i++)
+            {
+                // An unreadable card is not a candidate: its priority would be
+                // a guess, and guessing is what we are avoiding here.
+                if (string.IsNullOrWhiteSpace(names[i]) || MatchBaseMod(Normalize(names[i])) < 0)
+                {
+                    Log($"AutoChooser: start card[{i}] '(unreadable)' - skipped");
+                    continue;
+                }
+
+                int priority = GetPriority(names[i]);
+                Log($"AutoChooser: start card[{i}] '{names[i]}' priority={priority}");
+
+                if (priority >= 100) continue;      // never take
+                if (priority < bestPriority)
+                {
+                    bestPriority = priority;
+                    bestIdx = i;
+                }
+            }
+
+            if (bestIdx < 0)
+            {
+                if (!Settings.ForcePickWhenAllAvoided.Value)
+                {
+                    Log("AutoChooser: start screen - every offered modifier is set to never; leaving the choice alone.");
+                    _startCardPicked = true;
+                    return false;
+                }
+
+                // Least-bad fallback, same rule the in-encounter panel uses -
+                // still only among the cards we could actually identify.
+                for (int i = 0; i < count; i++)
+                {
+                    if (string.IsNullOrWhiteSpace(names[i]) || MatchBaseMod(Normalize(names[i])) < 0) continue;
+
+                    int priority = GetPriority(names[i]);
+                    if (priority < bestPriority)
+                    {
+                        bestPriority = priority;
+                        bestIdx = i;
+                    }
+                }
+
+                if (bestIdx < 0) { _startCardPicked = true; return false; }
+            }
+
+            _startCardPicked = true;
+            _lastStartClick = now;      // keep BEGIN from firing in the same tick
+
+            if (ClickElement(icons[bestIdx], $"start card[{bestIdx}]"))
+            {
+                Log($"AutoChooser: start screen - picked '{names[bestIdx]}' (priority {bestPriority}).");
+                return true;
+            }
+
+            return false;
+        }
+
+        // Modifier names for the start screen, straight off the altar entity.
+        // The icons themselves carry no text, so there is nothing to read from
+        // the UI - and hovering each one to get a tooltip would be far more
+        // fragile than reading the component.
+        private List<string> ReadStartScreenModifiers(out long altarAddr)
+        {
+            altarAddr = 0;
+            try
+            {
+                var entities = GameController?.EntityListWrapper?.OnlyValidEntities;
+                if (entities == null) return null;
+
+                Entity best = null;
+                float bestDist = float.MaxValue;
+
+                foreach (var entity in entities)
+                {
+                    if (entity == null || !entity.IsValid) continue;
+
+                    UltimatumTrial trial = null;
+                    try { trial = entity.GetComponent<UltimatumTrial>(); } catch { }
+                    if (trial == null) continue;
+
+                    float dist = entity.DistancePlayer;
+                    if (dist >= 0f && dist < bestDist)
+                    {
+                        bestDist = dist;
+                        best = entity;
+                    }
+                }
+
+                if (best == null)
+                {
+                    // Expected on this build: the altar interactable does not
+                    // expose UltimatumTrial. The hover fallback handles it, so
+                    // this is not worth logging on every pass.
+                    return null;
+                }
+
+                altarAddr = best.Address;
+
+                var mods = best.GetComponent<UltimatumTrial>()?.Modifiers;
+                if (mods == null || mods.Count == 0)
+                {
+                    Log($"AutoChooser: start screen - altar 0x{altarAddr:X} has UltimatumTrial but " +
+                        $"{(mods == null ? "Modifiers is null" : "the list is empty")}.");
+                    return null;
+                }
+
+                var names = new List<string>(3);
+                foreach (var m in mods)
+                {
+                    string name = null;
+                    try { name = m?.Name; } catch { }
+                    if (string.IsNullOrWhiteSpace(name))
+                    {
+                        try { name = m?.Id; } catch { }
+                    }
+
+                    names.Add(Normalize(name ?? string.Empty));
+                }
+
+                return names;
+            }
+            catch (Exception ex)
+            {
+                Log($"AutoChooser: start screen - reading modifiers failed: {ex.Message}");
+                return null;
+            }
+        }
+
+        // The in-encounter panel reads its three modifiers straight off
+        // ChoicesPanel.Modifiers and that works reliably. The start screen is a
+        // different element (a world label, not IngameUi's panel), but it is the
+        // same kind of UI underneath - so try casting its ancestors to
+        // UltimatumChoicePanel and reading the very same list. Far better than
+        // hovering: no cursor movement, no timing, exact names.
+        private List<string> ReadStartScreenModifiersTyped(Element beginButton)
+        {
+            Element node = beginButton;
+
+            for (int up = 0; up < 7 && node != null; up++)
+            {
+                try
+                {
+                    var cp = node.AsObject<UltimatumChoicePanel>();
+                    var mods = cp?.Modifiers;
+
+                    // A start screen offers three modifiers. Reinterpreting some
+                    // unrelated ancestor as a choice panel produced a list of 42
+                    // blank entries in the log, which then beat the (correct)
+                    // subtree sweep to the answer - so the shape is checked
+                    // before the contents are trusted.
+                    if (mods != null && mods.Count > 0 && mods.Count <= 6)
+                    {
+                        var names = new List<string>(mods.Count);
+                        bool anyReal = false;
+
+                        foreach (var m in mods)
+                        {
+                            string name = null;
+                            try { name = m?.Name; } catch { }
+                            if (string.IsNullOrWhiteSpace(name)) { try { name = m?.Id; } catch { } }
+                            name = Normalize(name ?? string.Empty);
+                            if (MatchBaseMod(name) >= 0) anyReal = true;
+                            names.Add(name);
+                        }
+
+                        if (anyReal)
+                        {
+                            Log($"AutoChooser: start screen - modifiers read from the panel: {string.Join(" | ", names)}");
+                            return names;
+                        }
+                    }
+                }
+                catch { }
+
+                try { node = node.Parent; } catch { break; }
+            }
+
+            // Ancestors gave nothing. The choices object may hang off a sibling
+            // branch rather than a parent, so sweep the whole start-screen
+            // subtree once: take the topmost ancestor and try every descendant.
+            try
+            {
+                Element top = beginButton;
+                for (int up = 0; up < 5; up++)
+                {
+                    Element parent = null;
+                    try { parent = top.Parent; } catch { }
+                    if (parent == null) break;
+                    top = parent;
+                }
+
+                var swept = SweepForChoiceModifiers(top, 0);
+                if (swept != null && swept.Count > 0)
+                {
+                    Log($"AutoChooser: start screen - modifiers found in the subtree: {string.Join(" | ", swept)}");
+                    return swept;
+                }
+            }
+            catch { }
+
+            return null;
+        }
+
+        private List<string> SweepForChoiceModifiers(Element el, int depth)
+        {
+            if (el == null || depth > 6) return null;
+
+            try
+            {
+                if (!el.IsValid) return null;
+
+                var cp = el.AsObject<UltimatumChoicePanel>();
+                var mods = cp?.Modifiers;
+                if (mods != null && mods.Count > 0 && mods.Count <= 6)
+                {
+                    var names = new List<string>(mods.Count);
+                    bool anyReal = false;
+
+                    foreach (var m in mods)
+                    {
+                        string name = null;
+                        try { name = m?.Name; } catch { }
+                        if (string.IsNullOrWhiteSpace(name)) { try { name = m?.Id; } catch { } }
+                        name = Normalize(name ?? string.Empty);
+                        if (MatchBaseMod(name) >= 0) anyReal = true;
+                        names.Add(name);
+                    }
+
+                    // Only trust a hit that actually resolves to known modifiers -
+                    // a random element reinterpreted as a choice panel yields junk.
+                    if (anyReal) return names;
+                }
+
+                long kids = el.ChildCount;
+                for (int i = 0; i < kids; i++)
+                {
+                    Element child = null;
+                    try { child = el.GetChildAtIndex(i); } catch { continue; }
+                    if (child == null) continue;
+
+                    var hit = SweepForChoiceModifiers(child, depth + 1);
+                    if (hit != null) return hit;
+                }
+            }
+            catch { }
+
+            return null;
+        }
+
+        // Fallback name source: hover each icon and read the tooltip the game
+        // shows. Used only when the altar's UltimatumTrial component is not
+        // readable. It moves the real cursor, so it runs once per start screen
+        // and bails out on pause exactly like the loot hover does.
+        private List<string> ReadModifiersByHover(List<Element> icons)
+        {
+            var names = new List<string>(icons.Count);
+
+            try
+            {
+                var window = GameController?.Window;
+                if (window == null) return null;
+
+                Vector2 topLeft = window.GetWindowRectangleTimeCache.TopLeft;
+
+                for (int i = 0; i < icons.Count; i++)
+                {
+                    if (DateTime.UtcNow < _pauseUntil || IsGamePausedNow()) return null;
+
+                    RectangleF r = icons[i].GetClientRect();
+                    if (r.Width <= 0 || r.Height <= 0) { names.Add(string.Empty); continue; }
+
+                    Vector2 center = r.Center + topLeft;
+                    Input.SetCursorPos(new System.Numerics.Vector2(center.X, center.Y));
+
+                    // The log showed all three hovers completing inside a single
+                    // millisecond, i.e. the tooltip never had a chance to appear.
+                    // Give the game a real frame or two before the first read and
+                    // keep polling for a while after.
+                    Thread.Sleep(90);
+
+                    string text = string.Empty;
+                    var sw = Stopwatch.StartNew();
+                    while (sw.ElapsedMilliseconds < 600)
+                    {
+                        text = ReadHoverTooltipText();
+                        if (MatchBaseMod(Normalize(text)) >= 0) break;
+                        Thread.Sleep(30);
+                        if (DateTime.UtcNow < _pauseUntil || IsGamePausedNow()) return null;
+                    }
+
+                    names.Add(Normalize(text));
+                    Log($"AutoChooser: start card[{i}] hover at ({center.X:0},{center.Y:0}) " +
+                        $"rect=({r.Width:0}x{r.Height:0}@{r.X:0},{r.Y:0}) -> '{Normalize(text)}'");
+
+                    // Nothing came back: show what the hover elements actually
+                    // contain, so the next fix is based on real text instead of
+                    // another guess about where tooltips live. The previous dump
+                    // reported the hover slot sitting exactly on BEGIN, which is
+                    // why the icon coordinates above are logged too - if they
+                    // match the button, the icons were misidentified.
+                    if (string.IsNullOrWhiteSpace(text) && Settings.Debug.Value && i == 0)
+                    {
+                        DumpHoverElements();
+                    }
+                }
+
+                return names;
+            }
+            catch (Exception ex)
+            {
+                Log($"AutoChooser: start screen - hover read failed: {ex.Message}");
+                return null;
+            }
+        }
+
+        // Whatever the game is currently showing as a hover tooltip.
+        //
+        // Deliberately unfiltered: an earlier version only returned text that
+        // already matched a known modifier, so anything phrased differently came
+        // back as "" and every card scored the default priority. Now the raw
+        // text is returned and the caller decides whether it recognises it.
+        private string ReadHoverTooltipText()
+        {
+            try
+            {
+                var ingame = GameController?.IngameState;
+                if (ingame == null) return string.Empty;
+
+                foreach (var candidate in new[] { ingame.UIHoverTooltip, ingame.UIHover, ingame.UIHoverElement })
+                {
+                    if (candidate == null) continue;
+
+                    string found = FirstNonEmptyText(candidate, 6);
+                    if (!string.IsNullOrWhiteSpace(found)) return found;
+                }
+            }
+            catch { }
+
+            return string.Empty;
+        }
+
+        // Longest text found in the subtree - tooltips put the title in one
+        // child and the description in another, and the longest line is the one
+        // that actually names the modifier.
+        private string FirstNonEmptyText(Element el, int depth)
+        {
+            string best = string.Empty;
+            CollectLongestText(el, depth, ref best);
+            return best;
+        }
+
+        private void CollectLongestText(Element el, int depth, ref string best)
+        {
+            if (el == null || depth < 0) return;
+
+            long kids = 0;
+            try
+            {
+                if (!el.IsValid) return;
+                kids = el.ChildCount;
+
+                string t = SafeText(el, 120);
+                if (!string.IsNullOrWhiteSpace(t) && t.Length > best.Length) best = t;
+            }
+            catch { return; }
+
+            for (int i = 0; i < kids; i++)
+            {
+                Element child = null;
+                try { child = el.GetChildAtIndex(i); } catch { continue; }
+                if (child == null) continue;
+                CollectLongestText(child, depth - 1, ref best);
+            }
+        }
+
+        // Diagnostic: what the three hover-related UI slots hold right now.
+        private void DumpHoverElements()
+        {
+            try
+            {
+                var ingame = GameController?.IngameState;
+                if (ingame == null) { Log("AutoChooser[hover]: IngameState null."); return; }
+
+                DumpHoverSlot("UIHoverTooltip", ingame.UIHoverTooltip);
+                DumpHoverSlot("UIHover", ingame.UIHover);
+                DumpHoverSlot("UIHoverElement", ingame.UIHoverElement);
+            }
+            catch (Exception ex)
+            {
+                Log($"AutoChooser[hover]: dump failed: {ex.Message}");
+            }
+        }
+
+        private void DumpHoverSlot(string label, Element el)
+        {
+            if (el == null) { Log($"AutoChooser[hover]: {label} = null"); return; }
+
+            try
+            {
+                var r = el.GetClientRect();
+                Log($"AutoChooser[hover]: {label} 0x{el.Address:X} valid={el.IsValid} kids={el.ChildCount} " +
+                    $"rect=({r.Width:0}x{r.Height:0}@{r.X:0},{r.Y:0})");
+
+                int n = 0;
+                DumpHoverWalk(el, new List<int>(), 0, ref n);
+            }
+            catch (Exception ex)
+            {
+                Log($"AutoChooser[hover]: {label} threw {ex.GetType().Name}");
+            }
+        }
+
+        private void DumpHoverWalk(Element el, List<int> path, int depth, ref int count)
+        {
+            if (el == null || depth > 6 || count >= 25) return;
+
+            long kids = 0;
+            try
+            {
+                if (!el.IsValid) return;
+                kids = el.ChildCount;
+
+                string t = SafeText(el, 90);
+                if (!string.IsNullOrWhiteSpace(t))
+                {
+                    count++;
+                    string p = path.Count == 0 ? "root" : string.Join("][", path);
+                    Log($"AutoChooser[hover]:    [{p}] '{t}'");
+                }
+            }
+            catch { return; }
+
+            for (int i = 0; i < kids && count < 25; i++)
+            {
+                Element child = null;
+                try { child = el.GetChildAtIndex(i); } catch { continue; }
+                if (child == null) continue;
+                path.Add(i);
+                DumpHoverWalk(child, path, depth + 1, ref count);
+                path.RemoveAt(path.Count - 1);
+            }
+        }
+
+        // Diagnostic for "no modifier data": lists nearby entities whose path
+        // mentions ultimatum, with the components they actually expose. Runs
+        // only with Debug on, throttled, and only when the read came up empty.
+        private DateTime _lastEntityDump = DateTime.MinValue;
+
+        private void DumpNearbyUltimatumEntities()
+        {
+            DateTime now = DateTime.UtcNow;
+            if ((now - _lastEntityDump).TotalMilliseconds < 5000) return;
+            _lastEntityDump = now;
+
+            try
+            {
+                var entities = GameController?.EntityListWrapper?.OnlyValidEntities;
+                if (entities == null) { Log("AutoChooser[trial]: entity list unavailable."); return; }
+
+                int shown = 0;
+                foreach (var entity in entities)
+                {
+                    if (entity == null || !entity.IsValid) continue;
+
+                    float dist = entity.DistancePlayer;
+                    if (dist > 60f) continue;
+
+                    string path = entity.Path ?? string.Empty;
+                    if (path.IndexOf("ultimatum", StringComparison.OrdinalIgnoreCase) < 0) continue;
+
+                    // Probe the components we care about by name rather than
+                    // enumerating ComponentList - that property's type drags in
+                    // GameOffsets, which the plugin does not reference.
+                    string comps;
+                    try
+                    {
+                        var present = new List<string>(4);
+                        if (entity.HasComponent<UltimatumTrial>()) present.Add("UltimatumTrial");
+                        if (entity.HasComponent<Targetable>()) present.Add("Targetable");
+                        if (entity.HasComponent<Render>()) present.Add("Render");
+                        comps = present.Count > 0 ? string.Join(",", present) : "(none of the probed ones)";
+                    }
+                    catch (Exception ex) { comps = "probe failed: " + ex.GetType().Name; }
+
+                    Log($"AutoChooser[trial]: {dist:0}u '{path}' components=[{comps}]");
+                    if (++shown >= 6) break;
+                }
+
+                if (shown == 0) Log("AutoChooser[trial]: no ultimatum-pathed entity within 60u.");
+            }
+            catch (Exception ex)
+            {
+                Log($"AutoChooser[trial]: entity dump failed: {ex.Message}");
+            }
+        }
+
+        // The three icons form a row just above BEGIN. Rather than guess at
+        // indices, collect the button's siblings/cousins that look like a row of
+        // equally-sized square icons sitting above it, ordered left to right.
+        private List<Element> FindStartCardIcons(Element beginButton, int expected)
+        {
+            try
+            {
+                RectangleF beginRect = beginButton.GetClientRect();
+                if (beginRect.Width <= 0) return null;
+
+                // Climb to the panel that holds both the icons and the button.
+                Element panel = beginButton;
+                for (int up = 0; up < 4; up++)
+                {
+                    Element parent = null;
+                    try { parent = panel.Parent; } catch { }
+                    if (parent == null) break;
+                    panel = parent;
+
+                    var candidates = CollectIconRow(panel, beginRect, expected);
+                    if (candidates != null) return candidates;
+                }
+            }
+            catch { }
+
+            return null;
+        }
+
+        private List<Element> CollectIconRow(Element panel, RectangleF beginRect, int expected)
+        {
+            var found = new List<Element>(8);
+            CollectIconCandidates(panel, beginRect, found, 0);
+            if (found.Count < expected) return null;
+
+            // The three modifier icons are a row of same-size squares. Keep the
+            // largest group that shares a size and a y, which drops stray
+            // square-ish decorations that happen to sit above the button.
+            var best = new List<Element>();
+            for (int i = 0; i < found.Count; i++)
+            {
+                RectangleF a = found[i].GetClientRect();
+                var group = new List<Element>();
+
+                for (int j = 0; j < found.Count; j++)
+                {
+                    RectangleF c = found[j].GetClientRect();
+                    if (Math.Abs(c.Width - a.Width) <= 6 &&
+                        Math.Abs(c.Height - a.Height) <= 6 &&
+                        Math.Abs(c.Y - a.Y) <= 14)
+                    {
+                        group.Add(found[j]);
+                    }
+                }
+
+                if (group.Count > best.Count) best = group;
+            }
+
+            if (best.Count < expected) return null;
+
+            best.Sort((x, y) => x.GetClientRect().X.CompareTo(y.GetClientRect().X));
+            if (best.Count > expected) best.RemoveRange(expected, best.Count - expected);
+            return best;
+        }
+
+        private void CollectIconCandidates(Element el, RectangleF beginRect, List<Element> into, int depth)
+        {
+            if (el == null || depth > 6 || into.Count > 40) return;
+
+            long kids = 0;
+            try
+            {
+                if (!el.IsValid) return;
+                kids = el.ChildCount;
+
+                var r = el.GetClientRect();
+                // Loosened from the first guess (20-70px, childless): on the
+                // real screen the icons came out larger and some carry a child
+                // node. Still square-ish, still in the band right above BEGIN.
+                bool squareish = r.Width >= 16 && r.Width <= 110 &&
+                                 Math.Abs(r.Width - r.Height) <= 14;
+                bool aboveButton = r.Y + r.Height <= beginRect.Y + 10;
+                bool nearButton = beginRect.Y - (r.Y + r.Height) <= 220;
+
+                // The icon row is centred over BEGIN. Without a horizontal
+                // bound the search wandered off to whatever square-ish elements
+                // happened to sit higher up the screen - the log caught a row
+                // picked up at the screen edge, far from the button.
+                float rowCentre = r.X + r.Width / 2f;
+                float buttonCentre = beginRect.X + beginRect.Width / 2f;
+                bool alignedWithButton = Math.Abs(rowCentre - buttonCentre) <= 180f;
+
+                if (squareish && aboveButton && nearButton && alignedWithButton && kids <= 1)
+                {
+                    into.Add(el);
+                    return;
+                }
+            }
+            catch { return; }
+
+            for (int i = 0; i < kids; i++)
+            {
+                Element child = null;
+                try { child = el.GetChildAtIndex(i); } catch { continue; }
+                if (child == null) continue;
+                CollectIconCandidates(child, beginRect, into, depth + 1);
+            }
+        }
+
+        // Diagnostic: every element in the start screen's subtree with its rect,
+        // relative to BEGIN. Only runs when icon detection failed and Debug is
+        // on, so it costs nothing in normal play.
+        private void DumpStartScreenGeometry(Element beginButton)
+        {
+            try
+            {
+                RectangleF b = beginButton.GetClientRect();
+                Log($"AutoChooser[cards]: BEGIN rect=({b.Width:0}x{b.Height:0}@{b.X:0},{b.Y:0})");
+
+                Element panel = beginButton;
+                for (int up = 0; up < 4; up++)
+                {
+                    Element parent = null;
+                    try { parent = panel.Parent; } catch { }
+                    if (parent == null) break;
+                    panel = parent;
+                }
+
+                int n = 0;
+                DumpStartGeometryWalk(panel, b, new List<int>(), 0, ref n);
+                Log($"AutoChooser[cards]: {n} elements listed.");
+            }
+            catch (Exception ex)
+            {
+                Log($"AutoChooser[cards]: geometry dump failed: {ex.Message}");
+            }
+        }
+
+        private void DumpStartGeometryWalk(Element el, RectangleF beginRect, List<int> path, int depth, ref int count)
+        {
+            if (el == null || depth > 6 || count >= 60) return;
+
+            long kids = 0;
+            try
+            {
+                if (!el.IsValid) return;
+                kids = el.ChildCount;
+
+                var r = el.GetClientRect();
+                if (r.Width > 0 && r.Height > 0)
+                {
+                    count++;
+                    string p = path.Count == 0 ? "panel" : string.Join("][", path);
+                    Log($"AutoChooser[cards]:   [{p}] ({r.Width:0}x{r.Height:0}@{r.X:0},{r.Y:0}) " +
+                        $"kids={kids} dyAboveBegin={(beginRect.Y - (r.Y + r.Height)):0} txt='{SafeText(el, 30)}'");
+                }
+            }
+            catch { return; }
+
+            for (int i = 0; i < kids && count < 60; i++)
+            {
+                Element child = null;
+                try { child = el.GetChildAtIndex(i); } catch { continue; }
+                if (child == null) continue;
+                path.Add(i);
+                DumpStartGeometryWalk(child, beginRect, path, depth + 1, ref count);
+                path.RemoveAt(path.Count - 1);
+            }
+        }
+
+        // --- Standing still ---------------------------------------------------
+        // The start screen is pinned to the altar, so while the character runs
+        // the whole thing slides across the screen with the camera: by the time
+        // the cursor arrives the icon has moved on. Acting only once movement
+        // has stopped removes that entire class of misclicks.
+        //
+        // Movement is read from the player's Actor.Action flag, with a position
+        // check as a second opinion - the flag can miss the odd frame, and a
+        // stale "still moving" would stall auto-start completely.
+        private System.Numerics.Vector2 _lastPlayerPos;
+        private DateTime _lastPlayerMoved = DateTime.MinValue;
+        private DateTime _lastStillDiag = DateTime.MinValue;
+        private bool _posInitialised;
+        private const float StandStillEpsilon = 0.35f;
+
+        public override void AreaChange(AreaInstance area)
+        {
+            _lastPlayerMoved = DateTime.MinValue;
+            _lastPlayerPos = default;
+
+            // Force a fresh baseline: the new area puts the character somewhere
+            // else entirely, and comparing against the old position would read
+            // as one enormous step.
+            _posInitialised = false;
+        }
+
+        private bool IsPlayerStandingStill(DateTime now, int quietMs)
+        {
+            try
+            {
+                var player = GameController?.Player;
+                if (player == null || !player.IsValid) return false;
+
+                bool movingFlag = false;
+                long rawAction = -1;
+                bool apiIsMoving = false;
+                try
+                {
+                    var actor = player.GetComponent<Actor>();
+                    if (actor != null)
+                    {
+                        rawAction = (long)actor.Action;
+                        movingFlag = (actor.Action & ActionFlags.Moving) != 0;
+                        try { apiIsMoving = actor.isMoving; } catch { }
+                    }
+                }
+                catch { }
+
+                var pos = player.GridPosNum;
+                float dx = pos.X - _lastPlayerPos.X;
+                float dy = pos.Y - _lastPlayerPos.Y;
+                bool movedOnGrid = (dx * dx + dy * dy) > (StandStillEpsilon * StandStillEpsilon);
+
+                // Auto-start stalled for minutes on "waiting for the character to
+                // stop moving" while the character was demonstrably standing
+                // still, so log what each input actually reports before changing
+                // the rule. Throttled to match the caller's own 3 s gate.
+                if (Settings.Debug.Value &&
+                    (now - _lastStillDiag).TotalMilliseconds >= 3000)
+                {
+                    _lastStillDiag = now;
+                    double quietFor = _lastPlayerMoved == DateTime.MinValue
+                        ? -1 : (now - _lastPlayerMoved).TotalMilliseconds;
+                    Log($"AutoChooser[still]: rawAction={rawAction} flagMoving={movingFlag} " +
+                        $"isMoving={apiIsMoving} pos=({pos.X:F2},{pos.Y:F2}) " +
+                        $"d=({dx:F2},{dy:F2}) movedOnGrid={movedOnGrid} quietFor={quietFor:F0}ms");
+                }
+
+                // Grid position is the ONLY signal. Actor.Action's Moving bit and
+                // Actor.isMoving both stick on while the character stands still
+                // (logged: rawAction=4224 flagMoving=True with no grid movement),
+                // and because the old code refreshed _lastPlayerPos on every
+                // frame the flag was set, the position check could never
+                // contradict it - auto-start stalled for minutes. Both flags are
+                // now diagnostic output only. Do not put them back in this branch.
+                if (!_posInitialised)
+                {
+                    _posInitialised = true;
+                    _lastPlayerPos = pos;
+                    _lastPlayerMoved = now;
+                    return false;
+                }
+
+                if (movedOnGrid)
+                {
+                    _lastPlayerPos = pos;
+                    _lastPlayerMoved = now;
+                    return false;
+                }
+
+                return (now - _lastPlayerMoved).TotalMilliseconds >= quietMs;
+            }
+            catch
+            {
+                // Unreadable state must not block the plugin.
+                return true;
+            }
+        }
+
+        private void TryStartUltimatum(DateTime now)
+        {
+            if (!Settings.AutoStart.Value) return;
+            if ((now - _lastStartClick).TotalMilliseconds < StartClickCooldownMs) return;
+
+            // Right after a wave ends the just-closed panel leaves elements
+            // behind that still look like a start screen, and the altar is of
+            // course still next to us - so the distance check alone lets them
+            // through. The log caught it clicking screen centre in the very
+            // millisecond the panel closed. A short settle window after any
+            // panel activity removes that whole class of false positives.
+            if ((now - _lastPanelSeen).TotalMilliseconds < StartAfterPanelQuietMs)
+            {
+                return;
+            }
+
+            // A live ultimatum monster means a round is still running, so there is
+            // nothing to start. The panel-quiet and distance gates both missed
+            // this: mid-round the panel has been closed for far longer than the
+            // settle window, and the altar we are fighting next to is well within
+            // range. Without this the log shows BEGIN being pressed repeatedly
+            // during the fight.
+            if (HasLiveUltimatumMonsters())
+            {
+                LogStartGated("AutoChooser: start screen found but the round is still running, not starting.");
+                return;
+            }
+
+            // Wait for the character to actually stop. The whole start screen is
+            // pinned to the altar, so while running it slides across the screen
+            // with the camera and every click chases a target that has already
+            // moved - which is what the scattered click coordinates in the logs
+            // were. Standing still makes the geometry stable.
+            if (!IsPlayerStandingStill(now, StartStandStillMs))
+            {
+                LogStartGated("AutoChooser: start screen found, waiting for the character to stop moving.");
+                return;
+            }
+
+            var button = ResolveStartButton(now);
+            if (button == null) return;
+
+            // Modifier names: the altar's UltimatumTrial component would be the
+            // clean source, but the logs show the interactable only carries
+            // Targetable+Render on this build - the component is not there to
+            // read. So this is expected to come back empty and the hover
+            // fallback in TryPickStartCard is the real path. Kept because it is
+            // free when it does work and is the only non-cursor-moving option.
+            var names = ReadStartScreenModifiers(out long altarAddr);
+
+            // Do not hammer the same button, but do not give up on it forever
+            // either. A click aimed at a distant altar can register as a move
+            // command instead of a button press: the character walks over, the
+            // encounter never starts, and a permanent latch would leave the bot
+            // waiting for a screen that is still sitting right there. So the
+            // same button is retried, just not sooner than this.
+            long addr = 0;
+            try { addr = button.Address; } catch { }
+            if (addr != 0 && addr == _startedButtonAddr &&
+                (now - _startedButtonAt).TotalMilliseconds < StartRetrySameButtonMs)
+            {
+                return;
+            }
+
+            // Same safe-AFK guard as everywhere else: never steal the cursor
+            // while the user is in another window.
+            if (Settings.OnlyWhenGameFocused.Value)
+            {
+                var window = GameController?.Window;
+                if (window == null || !window.IsForeground()) return;
+            }
+
+            // Re-check reach immediately before committing. The search runs on
+            // its own throttle and the cursor takes time to travel, so the
+            // character can be moving the whole while - by the time the click
+            // lands the altar may no longer be the one we measured.
+            if (!IsAltarWithinReach(button))
+            {
+                return;
+            }
+
+            // Outside Grueling Gauntlet the start screen still offers a choice
+            // of three modifiers, and it has to be made before BEGIN - once the
+            // encounter starts the pick is locked in. In Gauntlet mode the game
+            // chooses for us, so there is nothing to click.
+            if (!Settings.GruelingGauntlet.Value && !_startCardPicked)
+            {
+                if (TryPickStartCard(button, now, names, altarAddr))
+                {
+                    // Give the UI a moment to register the selection; BEGIN goes
+                    // out on the next pass.
+                    return;
+                }
+            }
+
+            _lastStartClick = now;
+            if (ClickElement(button, "begin (start screen)"))
+            {
+                _startedButtonAddr = addr;
+                _startedButtonAt = now;
+                Log("AutoChooser: start screen detected, pressed begin.");
+            }
+        }
+
+        private Element ResolveStartButton(DateTime now)
+        {
+            // Deliberately NOT caching across frames. Elements on this UI stay
+            // IsValid and keep their rect after their panel is gone (the closed
+            // ultimatum panel behaves exactly that way), so a cached BEGIN
+            // button would keep looking clickable long after the encounter
+            // started - and every click would land on empty screen. The
+            // encounter-type check below is what makes a match trustworthy, so
+            // it has to be re-run, not remembered.
+            if ((now - _lastStartSearch).TotalMilliseconds < StartSearchIntervalMs) return null;
+            _lastStartSearch = now;
+
+            var ui = GameController?.IngameState?.IngameUi;
+            if (ui == null) return null;
+
+            int budget = StartSearchNodeBudget;
+            return SearchStartButton(ui, 0, ref budget);
+        }
+
+        private Element SearchStartButton(Element el, int depth, ref int budget)
+        {
+            if (el == null || depth > StartSearchMaxDepth || budget <= 0) return null;
+            budget--;
+
+            long kids = 0;
+            try
+            {
+                if (!el.IsValid) return null;
+                kids = el.ChildCount;
+
+                string text = SafeText(el, 24);
+                if (text.Length > 0 && text.Trim().Equals("begin", StringComparison.OrdinalIgnoreCase))
+                {
+                    // IsVisible is not consulted at all: on this UI it reads
+                    // false for panels that are plainly on screen. What decides
+                    // is a real rect inside the window plus the encounter-type
+                    // check - together they separate a live start screen from
+                    // the leftover element of a dismissed one.
+                    var r = el.GetClientRect();
+                    if (r.Width > 0 && r.Height > 0 && IsOnScreen(r) &&
+                        IsUltimatumStartButton(el) && IsAltarWithinReach(el))
+                    {
+                        // Click the button frame rather than the bare label when
+                        // it is a sane size - a bigger target with jitter on.
+                        var parent = el.Parent;
+                        if (parent != null)
+                        {
+                            var pr = parent.GetClientRect();
+                            if (pr.Width >= r.Width && pr.Width <= 400 && pr.Height >= r.Height && pr.Height <= 120)
+                                return parent;
+                        }
+
+                        return el;
+                    }
+                }
+            }
+            catch { return null; }
+
+            for (int i = 0; i < kids && budget > 0; i++)
+            {
+                Element child = null;
+                try { child = el.GetChildAtIndex(i); } catch { continue; }
+                if (child == null) continue;
+
+                var hit = SearchStartButton(child, depth + 1, ref budget);
+                if (hit != null) return hit;
+            }
+
+            return null;
+        }
+
+        // How far the altar this start screen belongs to actually is. World
+        // labels carry the entity they are pinned to, so the distance comes
+        // straight from it; walking up the ancestors because the entity is set
+        // on the label root, not on the "begin" leaf.
+        private bool IsAltarWithinReach(Element beginLabel)
+        {
+            Element node = beginLabel;
+            for (int up = 0; up < 8 && node != null; up++)
+            {
+                Entity ent = null;
+                try { ent = node.Entity; } catch { }
+
+                if (ent != null)
+                {
+                    try
+                    {
+                        if (ent.IsValid)
+                        {
+                            float dist = ent.DistancePlayer;
+                            if (dist >= 0f && dist <= StartMaxAltarDistance) return true;
+
+                            LogStartGated($"AutoChooser: start screen found but its altar is {dist:0} units away " +
+                                $"(limit {StartMaxAltarDistance}), not starting yet.");
+                            return false;
+                        }
+                    }
+                    catch { }
+
+                    break;
+                }
+
+                try { node = node.Parent; } catch { break; }
+            }
+
+            // The label carried no usable entity. Rather than give up (which
+            // would disable auto-start entirely) fall back to the entity list:
+            // if any ultimatum object is close by, we are standing at an altar.
+            return HasUltimatumObjectNearby();
+        }
+
+        private bool HasUltimatumObjectNearby()
+        {
+            try
+            {
+                var entities = GameController?.EntityListWrapper?.OnlyValidEntities;
+                if (entities == null) return false;
+
+                float best = float.MaxValue;
+                foreach (var entity in entities)
+                {
+                    if (entity == null || !entity.IsValid) continue;
+
+                    string path = entity.Path;
+                    if (string.IsNullOrEmpty(path)) continue;
+
+                    if (path.IndexOf("ultimatum", StringComparison.OrdinalIgnoreCase) < 0) continue;
+
+                    // The encounter's own monsters live under
+                    // Metadata/Monsters/LeagueUltimatum/, so matching "ultimatum"
+                    // alone made this true for the whole fight - and BEGIN then
+                    // got pressed on the altar's world label while it drifted
+                    // across the screen with the camera. Excluding monsters
+                    // rather than whitelisting the altar path keeps an unknown
+                    // altar metadata name from disabling auto-start outright.
+                    if (path.IndexOf("/Monsters/", StringComparison.OrdinalIgnoreCase) >= 0) continue;
+
+                    float dist = entity.DistancePlayer;
+                    if (dist >= 0f && dist < best) best = dist;
+                }
+
+                if (best <= StartMaxAltarDistance) return true;
+
+                LogStartGated(best == float.MaxValue
+                    ? "AutoChooser: start screen found but no ultimatum object nearby, not starting."
+                    : $"AutoChooser: start screen found but the nearest ultimatum object is {best:0} units away " +
+                      $"(limit {StartMaxAltarDistance}), not starting yet.");
+            }
+            catch (Exception ex)
+            {
+                Log($"AutoChooser: altar distance check failed: {ex.Message}");
+            }
+
+            return false;
+        }
+
+        // Walk up from the "begin" label and require an encounter-type line
+        // somewhere in an ancestor's subtree, so other "begin" buttons in the
+        // game's UI can never be mistaken for the Ultimatum start screen.
+        private bool IsUltimatumStartButton(Element beginLabel)
+        {
+            Element node = beginLabel;
+            for (int up = 0; up < 5; up++)
+            {
+                Element parent = null;
+                try { parent = node.Parent; } catch { }
+                if (parent == null) return false;
+                node = parent;
+
+                if (SubtreeLooksLikeStartScreen(node, 0)) return true;
+            }
+
+            return false;
+        }
+
+        // The encounter-name list above can never be complete - the game has
+        // more phrasings than we have screenshots of - so the round timer that
+        // sits under BEGIN counts as an anchor too. It is wording-independent,
+        // which makes it the more durable of the two checks.
+        private static readonly Regex StartTimerPattern = new(@"^\d{1,2}:\d{2}$", RegexOptions.Compiled);
+
+        private bool SubtreeLooksLikeStartScreen(Element el, int depth)
+        {
+            if (el == null || depth > 4) return false;
+
+            long kids = 0;
+            try
+            {
+                if (!el.IsValid) return false;
+                kids = el.ChildCount;
+
+                string text = SafeText(el, 80);
+                if (text.Length > 0)
+                {
+                    string trimmed = text.Trim();
+                    if (StartTimerPattern.IsMatch(trimmed)) return true;
+
+                    string low = trimmed.ToLowerInvariant();
+                    for (int i = 0; i < EncounterTypeMarkers.Length; i++)
+                        if (low.Contains(EncounterTypeMarkers[i], StringComparison.Ordinal))
+                            return true;
+                }
+            }
+            catch { return false; }
+
+            for (int i = 0; i < kids; i++)
+            {
+                Element child = null;
+                try { child = el.GetChildAtIndex(i); } catch { continue; }
+                if (child == null) continue;
+                if (SubtreeLooksLikeStartScreen(child, depth + 1)) return true;
+            }
+
+            return false;
+        }
+
         private bool _pauseHotkeyWasPressed;
 
         [DllImport("user32.dll")]
         private static extern short GetAsyncKeyState(int vKey);
 
+        // Polls the pause hotkey through the OS rather than ExileCore's own
+        // input state on purpose: this is also called from inside the mouse
+        // travel loop and the loot hover wait, which run between rendered
+        // frames. ExileCore refreshes its input once per frame, so a
+        // node.PressedOnce() there would not see the key until the current
+        // click finished - which is exactly when the pause has to bite.
         private bool CheckPauseHotkey()
         {
-            int vk = (int)(Keys)Settings.PauseHotkey.Value;
+            var hk = Settings.PauseHotkey.Value;
+            int vk = (int)hk.Key;
+            if (vk == 0) return false;
+
             bool hotkeyDown = (GetAsyncKeyState(vk) & 0x8000) != 0;
             if (hotkeyDown && !_pauseHotkeyWasPressed)
             {
@@ -251,6 +1678,11 @@ namespace AutoChooser
                 _lootPanelBackSince = DateTime.MinValue;
                 _lootAnchor = null;
                 _votedThisRound = false;
+                // Pausing means the user is taking over. Any latched decision -
+                // notably "bank this run" - has to go with it, or the bot would
+                // override their choice the moment the pause expires.
+                _gauntletBanking = false;
+                _gauntletBankClicks = 0;
                 _lastHandle = DateTime.MinValue;
                 _followerWaitStart = DateTime.MinValue;
                 _pauseHotkeyWasPressed = true;
@@ -273,6 +1705,8 @@ namespace AutoChooser
                 _lootAnchor = null;
                 _pauseUntil = DateTime.MinValue;
                 _pauseHotkeyWasPressed = false;
+                _gauntletBanking = false;
+                _gauntletBankClicks = 0;
                 return;
             }
 
@@ -281,6 +1715,28 @@ namespace AutoChooser
             if (DateTime.UtcNow < _pauseUntil)
             {
                 return;
+            }
+
+            // The in-game pause menu (Esc) is a hard stop: nothing the plugin
+            // could click means anything while the game is frozen, and clicks
+            // aimed at the world would land on the menu instead. Panels stay in
+            // memory behind it, so without this check the bot happily keeps
+            // "working" against a frozen game.
+            if (IsGamePaused())
+            {
+                if (!_gamePausedLatch)
+                {
+                    _gamePausedLatch = true;
+                    Log("AutoChooser: game paused (Esc menu), holding off.");
+                }
+
+                return;
+            }
+
+            if (_gamePausedLatch)
+            {
+                _gamePausedLatch = false;
+                Log("AutoChooser: game resumed.");
             }
 
             DateTime now = DateTime.UtcNow;
@@ -295,6 +1751,8 @@ namespace AutoChooser
             {
                 Log($"AutoChooser: panel visibility read failed: {ex.Message}");
             }
+
+            if (panelVisible) _lastPanelSeen = now;
 
             // Loot pickup phase: panel is gone, click visible ground items.
             if (_lootPhaseActive)
@@ -414,6 +1872,8 @@ namespace AutoChooser
                     // never voted on and the bot gets stuck clicking a disabled confirm.
                     _panelActive = false;
                     _votedThisRound = false;
+                    _gauntletBanking = false;
+                    _gauntletBankClicks = 0;
                     _lastHandle = DateTime.MinValue;
                     _followerWaitStart = DateTime.MinValue;
 
@@ -489,8 +1949,15 @@ namespace AutoChooser
 
                 _panelActive = false;
                 _votedThisRound = false;
+                _gauntletBanking = false;
+                _gauntletBankClicks = 0;
                 _lastHandle = DateTime.MinValue;
                 _followerWaitStart = DateTime.MinValue;
+
+                // With no main panel up, the pre-encounter screen may be
+                // waiting on its BEGIN button. Checked last so it can never
+                // interfere with an encounter that is already running.
+                TryStartUltimatum(now);
                 return;
             }
 
@@ -500,6 +1967,12 @@ namespace AutoChooser
             {
                 _panelActive = true;
                 _panelOpenTime = now;
+
+                // The encounter is under way, so the start screen's pick is
+                // spent. Clearing it here (rather than only on a new altar
+                // address) means a second ultimatum at the same altar still
+                // gets a fresh choice.
+                _startCardPicked = false;
                 return;
             }
 
@@ -552,6 +2025,16 @@ namespace AutoChooser
                         choices.Add(el);
                     }
                 }
+            }
+
+            // Grueling Gauntlet: the game picks the modifier itself, so there is
+            // nothing to vote on - just accept each trial. The one exception is
+            // Drought (flasks gain no charges): with it active the run is not
+            // worth continuing, so we bank what we have instead.
+            if (Settings.GruelingGauntlet.Value)
+            {
+                HandleGauntletPanel(panel, choices, modifierNames);
+                return;
             }
 
             if (choices.Count == 0)
@@ -672,6 +2155,235 @@ namespace AutoChooser
             {
                 Log("AutoChooser: confirm/start button not found or not visible.");
             }
+        }
+
+        // --- Grueling Gauntlet -----------------------------------------------
+        // With "modifiers are chosen for you" there is nothing to vote on, so
+        // the only decision left each round is accept-or-bank. Which modifiers
+        // end the run is up to the user: the checkboxes next to the priority
+        // sliders mark them (Drought is ticked by default - flasks gain no
+        // charges, so the run is not worth continuing).
+
+        // Latched for as long as the panel stays up: once we have decided to
+        // bank, this round is over for us no matter what the panel shows next.
+        private bool _gauntletBanking;
+        private int _gauntletBankClicks;
+        private const int GauntletMaxBankClicks = 4;
+
+        // A modifier stops the run when its checkbox is ticked. Matching reuses
+        // MatchBaseMod, so tiered names resolve to their own entry ("Quicksand
+        // III" to Quicksand III, not to Quicksand).
+        private bool IsStopperName(string name)
+        {
+            if (string.IsNullOrWhiteSpace(name)) return false;
+            int idx = MatchBaseMod(Normalize(name));
+            return Settings.IsGauntletStopper(idx);
+        }
+
+        private void HandleGauntletPanel(UltimatumPanel panel, List<Element> choices, List<string> modifierNames)
+        {
+            // Already decided to bank on an earlier pass of this same panel.
+            // Keep trying "take rewards" and never fall through to accept -
+            // after the click the panel briefly shows no cards, and pressing
+            // confirm there would start the very wave we are trying to avoid.
+            if (_gauntletBanking)
+            {
+                if (!ClickTakeRewards(panel))
+                {
+                    _gauntletBanking = false;
+                }
+
+                return;
+            }
+
+            // No cards on screen: the opening "Begin" screen, or the round
+            // header between waves. Either way just press the button.
+            if (choices.Count == 0)
+            {
+                if (panel.ConfirmButton is Element begin && begin.IsValid && begin.IsVisible)
+                {
+                    ClickElement(begin, "gauntlet confirm/begin");
+                    Log("AutoChooser: gauntlet - no cards on screen, pressed confirm/begin.");
+                }
+                else
+                {
+                    Log("AutoChooser: gauntlet - no cards and no confirm button visible.");
+                }
+
+                return;
+            }
+
+            int selected = FindSelectedChoiceIndex(panel, choices);
+            bool bank;
+
+            if (selected >= 0)
+            {
+                string name = GetChoiceName(choices, modifierNames, selected);
+                bank = IsStopperName(name);
+                Log($"AutoChooser: gauntlet - game picked option[{selected}] '{name}'{(bank ? " -> marked as stopper, banking rewards" : "")}.");
+            }
+            else
+            {
+                // The selection could not be read. Accepting a stopper round by
+                // mistake can cost the whole run; banking by mistake only costs
+                // the rounds we would have won after this one. So fall back to
+                // the cautious answer: bank if a stopper is on screen at all.
+                bank = false;
+                string hit = null;
+                for (int i = 0; i < choices.Count && !bank; i++)
+                {
+                    string name = GetChoiceName(choices, modifierNames, i);
+                    if (IsStopperName(name))
+                    {
+                        bank = true;
+                        hit = name;
+                    }
+                }
+
+                Log($"AutoChooser: gauntlet - could not tell which card is selected; " +
+                    $"{(bank ? $"'{hit}' is among them, banking rewards" : "no stopper on screen, accepting")}.");
+            }
+
+            if (!bank)
+            {
+                if (panel.ConfirmButton is Element accept && accept.IsValid && accept.IsVisible)
+                {
+                    ClickElement(accept, "gauntlet accept trial");
+                    Log("AutoChooser: gauntlet - pressed accept trial.");
+                }
+                else
+                {
+                    Log("AutoChooser: gauntlet - accept trial button not found or not visible.");
+                }
+
+                return;
+            }
+
+            _gauntletBanking = true;
+            if (!ClickTakeRewards(panel))
+            {
+                // The click never landed (pause hotkey, or the button vanished).
+                // Do not stay latched: the user may have taken over and chosen
+                // to continue, and a latched flag would keep pressing "take
+                // rewards" over their decision on every later round.
+                _gauntletBanking = false;
+            }
+        }
+
+        // Re-clicking is capped: unlike confirm (a no-op until everyone has
+        // voted), a stray click here could land on the rewards inventory that
+        // opens once the encounter ends. Returns true when a click was fired.
+        private bool ClickTakeRewards(UltimatumPanel panel)
+        {
+            if (_gauntletBankClicks >= GauntletMaxBankClicks)
+            {
+                Log("AutoChooser: gauntlet - take rewards already clicked, waiting for the panel to close.");
+                return true;
+            }
+
+            var take = FindTakeRewardsButton(panel);
+            if (take == null)
+            {
+                Log("AutoChooser: gauntlet - take rewards button not found; not clicking anything.");
+                return false;
+            }
+
+            if (!ClickElement(take, "gauntlet take rewards"))
+            {
+                Log("AutoChooser: gauntlet - take rewards click was interrupted.");
+                return false;
+            }
+
+            _gauntletBankClicks++;
+            Log($"AutoChooser: gauntlet - pressed take rewards ({_gauntletBankClicks}/{GauntletMaxBankClicks}).");
+            return true;
+        }
+
+        // Which of the three cards the game marked as chosen. -1 when unknown.
+        private int FindSelectedChoiceIndex(UltimatumPanel panel, List<Element> choices)
+        {
+            // Strongly typed first: each card knows whether it is the selected one.
+            try
+            {
+                var typed = panel.ChoicesPanel?.ChoiceElements;
+                if (typed != null)
+                {
+                    for (int i = 0; i < typed.Count; i++)
+                    {
+                        var c = typed[i];
+                        if (c != null && c.IsSelectedChoice)
+                        {
+                            return i;
+                        }
+                    }
+                }
+            }
+            catch { }
+
+            // Then the index - trusted only in a plausible range, since some
+            // builds return garbage for SelectedChoice.
+            try
+            {
+                int sel = panel.SelectedChoice;
+                if (sel >= 0 && sel < choices.Count)
+                {
+                    return sel;
+                }
+            }
+            catch { }
+
+            return -1;
+        }
+
+        private string GetChoiceName(List<Element> choices, List<string> modifierNames, int index)
+        {
+            if (index < 0) return string.Empty;
+
+            if (index < modifierNames.Count && !string.IsNullOrWhiteSpace(modifierNames[index]))
+            {
+                return modifierNames[index];
+            }
+
+            return index < choices.Count ? GetElementModifierText(choices[index]) : string.Empty;
+        }
+
+        // "TAKE REWARDS" has no strongly-typed accessor - ExileApi only exposes
+        // ConfirmButton, which is ACCEPT TRIAL - so it is located by its label.
+        private Element FindTakeRewardsButton(UltimatumPanel panel)
+        {
+            return FindDescendantByText(panel, "take reward", 0);
+        }
+
+        private Element FindDescendantByText(Element el, string needle, int depth)
+        {
+            if (el == null || depth > 6) return null;
+
+            long kids = 0;
+            try
+            {
+                if (!el.IsValid) return null;
+                kids = el.ChildCount;
+
+                string text = SafeText(el, 60);
+                if (text.Length > 0 && text.IndexOf(needle, StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    var r = el.GetClientRect();
+                    if (r.Width > 0 && r.Height > 0) return el;
+                }
+            }
+            catch { return null; }
+
+            for (int i = 0; i < kids; i++)
+            {
+                Element child = null;
+                try { child = el.GetChildAtIndex(i); } catch { continue; }
+                if (child == null) continue;
+
+                var hit = FindDescendantByText(child, needle, depth + 1);
+                if (hit != null) return hit;
+            }
+
+            return null;
         }
 
         private (int Index, Element Element, int Priority) PickByPriority(List<Element> choices, List<string> modifierNames)
@@ -1029,11 +2741,17 @@ namespace AutoChooser
         }
 
 
+        // Priority for a modifier that is not in the list. Fixed in code: the
+        // list covers every known modifier, so this only applies to something
+        // the game has added since - and 20 ("take it only if nothing better is
+        // offered") is the sane answer for an unknown.
+        private const int UnknownModifierPriority = 20;
+
         private int GetPriority(string modifierName)
         {
             if (string.IsNullOrWhiteSpace(modifierName))
             {
-                return Settings.DefaultPriority.Value;
+                return UnknownModifierPriority;
             }
 
             string norm = Normalize(modifierName);
@@ -1045,7 +2763,7 @@ namespace AutoChooser
                 return p;
             }
 
-            return Settings.DefaultPriority.Value;
+            return UnknownModifierPriority;
         }
 
         private static int MatchBaseMod(string norm)
@@ -1110,6 +2828,35 @@ namespace AutoChooser
 
                     float dist = entity.DistancePlayer;
                     if (dist > 0f && dist < maxDist)
+                        return true;
+                }
+            }
+            catch
+            {
+            }
+
+            return false;
+        }
+
+        // Unlike HasNearbyHostileMonsters this ignores distance and only counts the
+        // encounter's own spawns (Metadata/Monsters/LeagueUltimatum/...), so it
+        // answers "is a round still running" rather than "is something next to me".
+        private bool HasLiveUltimatumMonsters()
+        {
+            try
+            {
+                var entities = GameController?.EntityListWrapper?.OnlyValidEntities;
+                if (entities == null) return false;
+
+                foreach (var entity in entities)
+                {
+                    if (entity == null || !entity.IsValid) continue;
+                    if (entity.Type != EntityType.Monster) continue;
+                    if (!entity.IsAlive || !entity.IsHostile) continue;
+
+                    string path = entity.Path;
+                    if (string.IsNullOrEmpty(path)) continue;
+                    if (path.IndexOf("LeagueUltimatum", StringComparison.OrdinalIgnoreCase) >= 0)
                         return true;
                 }
             }
@@ -1419,6 +3166,7 @@ namespace AutoChooser
                 Thread.Sleep(LootHoverPollMs);
                 CheckPauseHotkey();
                 if (DateTime.UtcNow < _pauseUntil) return false;
+                if (IsGamePausedNow()) return false;
             }
             while (sw.ElapsedMilliseconds < timeoutMs);
 
@@ -1447,18 +3195,21 @@ namespace AutoChooser
             }
         }
 
-        private void ClickElement(Element el, string label)
+        // Returns true only when a click was actually fired. The pause hotkey is
+        // polled inside the cursor travel, so a click can be abandoned halfway;
+        // callers that latch state on "we clicked" have to know the difference.
+        private bool ClickElement(Element el, string label)
         {
             RectangleF rect = el.GetClientRect();
             if (rect.Width <= 0 || rect.Height <= 0)
             {
-                return;
+                return false;
             }
 
             var window = GameController?.Window;
             if (window == null)
             {
-                return;
+                return false;
             }
 
             var rectCache = window.GetWindowRectangleTimeCache;
@@ -1476,13 +3227,16 @@ namespace AutoChooser
             try
             {
                 MoveMouseSmooth(x, y);
-                if (DateTime.UtcNow < _pauseUntil) return;
+                if (DateTime.UtcNow < _pauseUntil) return false;
+                if (IsGamePausedNow()) return false;
                 Thread.Sleep(20 + _rng.Next(0, 40));
                 NativeMouse.LeftClick();
+                return true;
             }
             catch (Exception ex)
             {
                 Log($"AutoChooser: click failed: {ex.Message}");
+                return false;
             }
         }
 
@@ -1513,6 +3267,10 @@ namespace AutoChooser
             {
                 CheckPauseHotkey();
                 if (DateTime.UtcNow < _pauseUntil) return;
+
+                // Esc can be pressed mid-travel; abandon the move rather than
+                // keep dragging the cursor across a frozen game.
+                if (IsGamePausedNow()) return;
 
                 double t = (double)s / steps;
                 double e = t < 0.5 ? 2 * t * t : 1 - Math.Pow(-2 * t + 2, 2) / 2;
@@ -1638,7 +3396,25 @@ namespace AutoChooser
         public AutoChooserSettings()
         {
             Priorities = new List<string>(DefaultPriorities);
+            GauntletStop = new List<bool>(DefaultGauntletStop);
             OptionPriorityPanel.DrawDelegate = DrawOptionPriorities;
+        }
+
+        // Only Drought is a stopper out of the box - it is the one modifier that
+        // makes a run not worth continuing. Built from the names rather than
+        // written as a literal so the flags cannot drift out of alignment when
+        // UltimatumMods is edited.
+        private static readonly bool[] DefaultGauntletStop = BuildDefaultGauntletStop();
+
+        private static bool[] BuildDefaultGauntletStop()
+        {
+            var flags = new bool[UltimatumMods.Length];
+            for (int i = 0; i < UltimatumMods.Length; i++)
+            {
+                flags[i] = UltimatumMods[i].IndexOf("Drought", StringComparison.OrdinalIgnoreCase) >= 0;
+            }
+
+            return flags;
         }
 
         public ToggleNode Enable { get; set; } = new ToggleNode(false);
@@ -1646,8 +3422,14 @@ namespace AutoChooser
         [Menu("This client is the party leader (picks the modifier). Uncheck to follow the party leader's vote", 0)]
         public ToggleNode PartyLeader { get; set; } = new ToggleNode(true);
 
+        [Menu("Grueling Gauntlet: modifiers are chosen by the game - just press Accept Trial (banks the rewards instead if Drought is the chosen modifier)", 14)]
+        public ToggleNode GruelingGauntlet { get; set; } = new ToggleNode(false);
+
+        [Menu("Auto-start: press BEGIN on the pre-encounter screen to start the ultimatum", 15)]
+        public ToggleNode AutoStart { get; set; } = new ToggleNode(true);
+
         [Menu("Hotkey to pause the bot for the duration set below", 11)]
-        public HotkeyNode PauseHotkey { get; set; } = new HotkeyNode(Keys.F);
+        public HotkeyNodeV2 PauseHotkey { get; set; } = new HotkeyNodeV2(Keys.F);
 
         [Menu("Pause duration after the hotkey press (ms)", 12)]
         public RangeNode<int> PauseDurationMs { get; set; } = new RangeNode<int>(6000, 500, 60000);
@@ -1657,9 +3439,6 @@ namespace AutoChooser
 
         [Menu("If all 3 present options are set to 100 (never), pick least-bad anyway", 2)]
         public ToggleNode ForcePickWhenAllAvoided { get; set; } = new ToggleNode(true);
-
-        [Menu("Priority used when a modifier is not in the list", 3)]
-        public RangeNode<int> DefaultPriority { get; set; } = new RangeNode<int>(20, 1, 100);
 
         [Menu("Delay between option and start click (ms)", 4)]
         public RangeNode<int> ClickDelayMs { get; set; } = new RangeNode<int>(300, 0, 5000);
@@ -1689,8 +3468,22 @@ namespace AutoChooser
         [Menu("Ultimatum option priorities (1 = always, >= Avoid threshold = never)", 6)]
         public CustomNode OptionPriorityPanel { get; } = new CustomNode();
 
+        // Persisted, but never drawn by the settings reflection pass: the
+        // priorities are rendered by hand in DrawOptionPriorities above.
+        // Without [IgnoreMenu] ExileCore walks this property looking for a node
+        // type it can draw, finds a plain List<string> and logs
+        // "... is not a supported settings element. This is probably a bug in
+        // the plugin." on every load. The value itself always saved fine.
+        [IgnoreMenu]
         [JsonProperty(ObjectCreationHandling = ObjectCreationHandling.Replace)]
         public List<string> Priorities { get; set; }
+
+        // Per-modifier "end the run" flags for Grueling Gauntlet, index-aligned
+        // with UltimatumMods. Same deal as Priorities: persisted, drawn by hand,
+        // hidden from the settings reflection pass.
+        [IgnoreMenu]
+        [JsonProperty(ObjectCreationHandling = ObjectCreationHandling.Replace)]
+        public List<bool> GauntletStop { get; set; }
 
         private static readonly string[] DefaultPriorities =
         {
@@ -1772,22 +3565,80 @@ namespace AutoChooser
                 return;
             }
 
+            EnsureGauntletStopSize();
+
             ImGui.TextWrapped("1 = always take, higher = avoid. >= Avoid threshold = never take.");
+            ImGui.TextWrapped("The checkbox marks a modifier as a Grueling Gauntlet stopper: " +
+                              "when the game picks it, the plugin takes the rewards and ends the run " +
+                              "instead of accepting the next trial. Used only while Grueling Gauntlet is on.");
 
             if (ImGui.Button("Reset to defaults"))
             {
                 Priorities = new List<string>(DefaultPriorities);
+                GauntletStop = new List<bool>(DefaultGauntletStop);
+            }
+
+            ImGui.SameLine();
+            if (ImGui.Button("Clear all stoppers"))
+            {
+                for (int i = 0; i < GauntletStop.Count; i++)
+                {
+                    GauntletStop[i] = false;
+                }
             }
 
             int n = Math.Min(Priorities.Count, UltimatumMods.Length);
             for (int i = 0; i < n; i++)
             {
+                // Checkbox first, slider after, both on one row. The checkbox
+                // needs its own ImGui id or every row would share one.
+                bool stop = i < GauntletStop.Count && GauntletStop[i];
+                if (ImGui.Checkbox($"##gauntletStop{i}", ref stop))
+                {
+                    GauntletStop[i] = stop;
+                }
+
+                if (ImGui.IsItemHovered())
+                {
+                    ImGui.SetTooltip("Grueling Gauntlet: stop the run when this modifier is chosen");
+                }
+
+                ImGui.SameLine();
+
                 int value = int.TryParse(Priorities[i], out int parsed) ? parsed : 20;
                 if (ImGui.SliderInt(UltimatumMods[i], ref value, 1, 100))
                 {
                     Priorities[i] = value.ToString();
                 }
             }
+        }
+
+        // The stopper list has to line up with UltimatumMods by index. A config
+        // saved by an older build has none, and one saved before a modifier was
+        // added to the list has too few, so it is padded/trimmed on use rather
+        // than trusted.
+        private void EnsureGauntletStopSize()
+        {
+            GauntletStop ??= new List<bool>(UltimatumMods.Length);
+
+            while (GauntletStop.Count < UltimatumMods.Length)
+            {
+                int i = GauntletStop.Count;
+                GauntletStop.Add(i < DefaultGauntletStop.Length && DefaultGauntletStop[i]);
+            }
+
+            if (GauntletStop.Count > UltimatumMods.Length)
+            {
+                GauntletStop.RemoveRange(UltimatumMods.Length, GauntletStop.Count - UltimatumMods.Length);
+            }
+        }
+
+        // True for a modifier that should end a Grueling Gauntlet run.
+        public bool IsGauntletStopper(int modIndex)
+        {
+            if (modIndex < 0) return false;
+            EnsureGauntletStopSize();
+            return modIndex < GauntletStop.Count && GauntletStop[modIndex];
         }
     }
 }
